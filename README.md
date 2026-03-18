@@ -51,14 +51,22 @@ powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1
 powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1 -SkipSigning
 ```
 
+5. Build the macOS installer package (`.pkg`) on a macOS machine:
+
+```bash
+chmod +x ./build/Build-macOS-Installer.sh
+./build/Build-macOS-Installer.sh
+```
+
 ## Automated release
 
 Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
 
 - install Inno Setup on a Windows runner
-- build `OpenClawSetup.exe`
-- create/update a GitHub Release with the installer attached
-- publish SHA256 and file size in release notes
+- build `OpenClawSetup.exe` on Windows
+- build `OpenClawSetup-macOS.pkg` on macOS
+- create/update a GitHub Release with both installers attached
+- publish SHA256 and file size for both files in release notes
 
 Example:
 

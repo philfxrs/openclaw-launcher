@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_FILE="/var/log/openclaw-macos-installer.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] OpenClaw macOS postinstall started"
+
+CONSOLE_USER="$(stat -f%Su /dev/console)"
+if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
+  echo "No logged-in desktop user was detected; skipping user-level install steps."
+  exit 0
+fi
+
+run_as_user() {
+  local cmd="$1"
+  su -l "$CONSOLE_USER" -c "$cmd"
+}
+
+if ! run_as_user "command -v node >/dev/null 2>&1"; then
+  echo "Node.js was not found for user $CONSOLE_USER. Please install Node.js 22+ and rerun OpenClaw setup."
+  exit 1
+fi
+
+if ! run_as_user "command -v git >/dev/null 2>&1"; then
+  echo "Git was not found for user $CONSOLE_USER. Install Xcode Command Line Tools or Git, then rerun setup."
+  exit 1
+fi
+
+INSTALL_URL="https://openclaw.ai/install.sh"
+run_as_user "curl -fsSL '$INSTALL_URL' | bash -s -- --install-method npm --no-onboard"
+
+TOKEN_CMD='mkdir -p "$HOME/.openclaw"; TOKEN=$(openssl rand -base64 32 | tr -d "=\n" | tr "/+" "_-" | cut -c1-43); printf "%s" "$TOKEN" > "$HOME/.openclaw/gateway-token"; echo "$TOKEN"'
+TOKEN="$(run_as_user "$TOKEN_CMD")"
+
+run_as_user "openclaw onboard --non-interactive --gateway-token '$TOKEN'"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] OpenClaw macOS postinstall finished"
+exit 0
