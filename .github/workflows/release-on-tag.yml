@@ -83,6 +83,7 @@ jobs:
           xcrun stapler validate "$PKG_PATH"
 
       - name: Verify Gatekeeper policy
+        if: env.OPENCLAW_MACOS_PKG_SIGN_IDENTITY != ''
         shell: bash
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
