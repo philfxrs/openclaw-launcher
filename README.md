@@ -74,6 +74,20 @@ For trusted distribution on newer macOS versions, the release workflow now requi
 
 Local manual builds can still run unsigned for testing, but release tags must pass signing + notarization.
 
+To configure these values in GitHub in one step after you have the real Apple assets, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Configure-GitHub-macOS-Signing.ps1 `
+  -Repository philfxrs/openclaw-launcher `
+  -P12Path .\AppleDeveloperCertificates.p12 `
+  -P12Password 'YOUR_P12_PASSWORD' `
+  -AppleId 'your-apple-id@example.com' `
+  -AppleTeamId 'ABCDE12345' `
+  -AppleAppSpecificPassword 'xxxx-xxxx-xxxx-xxxx' `
+  -MacOSAppSignIdentity 'Developer ID Application: Your Name (ABCDE12345)' `
+  -MacOSPkgSignIdentity 'Developer ID Installer: Your Name (ABCDE12345)'
+```
+
 ## Automated release
 
 Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
