@@ -19,23 +19,82 @@ run_as_user() {
   su -l "$CONSOLE_USER" -c "$cmd"
 }
 
-if ! run_as_user "command -v node >/dev/null 2>&1"; then
-  echo "Node.js was not found for user $CONSOLE_USER. Please install Node.js 22+ and rerun OpenClaw setup."
-  exit 1
-fi
+ensure_homebrew() {
+  if run_as_user "command -v brew >/dev/null 2>&1"; then
+    return
+  fi
 
-if ! run_as_user "command -v git >/dev/null 2>&1"; then
-  echo "Git was not found for user $CONSOLE_USER. Install Xcode Command Line Tools or Git, then rerun setup."
-  exit 1
-fi
+  echo "Homebrew not found. Installing Homebrew for $CONSOLE_USER"
+  local brew_installer
+  brew_installer="$(mktemp /tmp/openclaw-homebrew-install.XXXXXX.sh)"
+  curl -fsSL "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh" -o "$brew_installer"
+  chmod +x "$brew_installer"
+  run_as_user "NONINTERACTIVE=1 CI=1 /bin/bash '$brew_installer'"
+  rm -f "$brew_installer"
+}
+
+brew_cmd() {
+  if run_as_user "test -x /opt/homebrew/bin/brew"; then
+    echo "/opt/homebrew/bin/brew"
+    return
+  fi
+
+  if run_as_user "test -x /usr/local/bin/brew"; then
+    echo "/usr/local/bin/brew"
+    return
+  fi
+
+  echo "brew"
+}
+
+ensure_node() {
+  local current_major
+  current_major="$(run_as_user "if command -v node >/dev/null 2>&1; then node -v | sed -E 's/^v([0-9]+).*/\\1/'; fi" || true)"
+
+  if [[ -n "$current_major" && "$current_major" -ge 22 ]]; then
+    echo "Node.js v$current_major already satisfies minimum requirement."
+    return
+  fi
+
+  echo "Installing/upgrading Node.js to 22+ via Homebrew"
+  ensure_homebrew
+  local brew
+  brew="$(brew_cmd)"
+  run_as_user "'$brew' update"
+  run_as_user "'$brew' install node@22 || '$brew' install node"
+  run_as_user "'$brew' link --overwrite --force node@22 || true"
+}
+
+ensure_git() {
+  if run_as_user "command -v git >/dev/null 2>&1"; then
+    echo "Git is already installed."
+    return
+  fi
+
+  echo "Installing Git via Homebrew"
+  ensure_homebrew
+  local brew
+  brew="$(brew_cmd)"
+  run_as_user "'$brew' update"
+  run_as_user "'$brew' install git"
+}
+
+ensure_node
+ensure_git
+
+run_as_user "PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\" command -v node >/dev/null 2>&1"
+run_as_user "PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\" command -v git >/dev/null 2>&1"
 
 INSTALL_URL="https://openclaw.ai/install.sh"
-run_as_user "curl -fsSL '$INSTALL_URL' | bash -s -- --install-method npm --no-onboard"
+run_as_user "PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\" curl -fsSL '$INSTALL_URL' | bash -s -- --install-method npm --no-onboard"
 
 TOKEN_CMD='mkdir -p "$HOME/.openclaw"; TOKEN=$(openssl rand -base64 32 | tr -d "=\n" | tr "/+" "_-" | cut -c1-43); printf "%s" "$TOKEN" > "$HOME/.openclaw/gateway-token"; echo "$TOKEN"'
 TOKEN="$(run_as_user "$TOKEN_CMD")"
 
-run_as_user "openclaw onboard --non-interactive --gateway-token '$TOKEN'"
+OPENCLAW_CMD='if command -v openclaw >/dev/null 2>&1; then command -v openclaw; elif [ -x "$HOME/.npm/bin/openclaw" ]; then echo "$HOME/.npm/bin/openclaw"; elif [ -x "$HOME/.npm-global/bin/openclaw" ]; then echo "$HOME/.npm-global/bin/openclaw"; else echo "openclaw"; fi'
+OPENCLAW_BIN="$(run_as_user "$OPENCLAW_CMD")"
+
+run_as_user "PATH=\"/opt/homebrew/bin:/usr/local/bin:\$HOME/.npm/bin:\$HOME/.npm-global/bin:\$PATH\" '$OPENCLAW_BIN' onboard --non-interactive --gateway-token '$TOKEN'"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] OpenClaw macOS postinstall finished"
 exit 0

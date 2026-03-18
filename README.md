@@ -58,6 +58,8 @@ chmod +x ./build/Build-macOS-Installer.sh
 ./build/Build-macOS-Installer.sh
 ```
 
+The macOS installer is designed for fresh systems as well. During postinstall it will attempt to provision missing prerequisites (Homebrew, Node.js 22+, and Git) before running the OpenClaw install/onboarding flow.
+
 ## Automated release
 
 Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
