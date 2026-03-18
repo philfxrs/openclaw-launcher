@@ -51,6 +51,22 @@ powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1
 powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1 -SkipSigning
 ```
 
+## Automated release
+
+Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
+
+- install Inno Setup on a Windows runner
+- build `OpenClawSetup.exe`
+- create/update a GitHub Release with the installer attached
+- publish SHA256 and file size in release notes
+
+Example:
+
+```powershell
+git tag v0.1.1
+git push origin v0.1.1
+```
+
 ## Signing
 
 - The build now signs `OpenClawLauncher.exe` and `OpenClawSetup.exe` by default.

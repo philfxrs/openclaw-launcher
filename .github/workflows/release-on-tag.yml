@@ -1,0 +1,67 @@
+name: Release On Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1 -SkipSigning
+
+      - name: Prepare release notes
+        id: meta
+        shell: pwsh
+        run: |
+          $installer = 'artifacts/installer/OpenClawSetup.exe'
+          if (-not (Test-Path $installer)) {
+            throw "Installer was not generated: $installer"
+          }
+
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item $installer).Length
+
+          "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          $notes = @(
+            'OpenClaw Windows Installer 自动构建发布。'
+            ''
+            '## 下载'
+            '- 资产: OpenClawSetup.exe'
+            ''
+            '## 文件校验'
+            '- 文件名: OpenClawSetup.exe'
+            "- 大小(字节): $size"
+            "- SHA256: $hash"
+          )
+
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: artifacts/installer/OpenClawSetup.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
