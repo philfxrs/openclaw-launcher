@@ -15,6 +15,8 @@ ROOT_DIR="$WORK_DIR/root"
 APP_DIR="$ROOT_DIR/Applications/OpenClaw Launcher.app"
 APP_CONTENTS="$APP_DIR/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_SIGN_IDENTITY="${OPENCLAW_MACOS_APP_SIGN_IDENTITY:-}"
+PKG_SIGN_IDENTITY="${OPENCLAW_MACOS_PKG_SIGN_IDENTITY:-}"
 
 mkdir -p "$OUTPUT_DIR" "$APP_MACOS"
 rm -rf "$WORK_DIR"
@@ -72,12 +74,38 @@ chmod +x "$REPO_ROOT/macos/pkg-scripts/postinstall"
 
 VERSION="${OPENCLAW_MACOS_VERSION:-$(git -C "$REPO_ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.0")}"
 PKG_PATH="$OUTPUT_DIR/OpenClawSetup-macOS.pkg"
+UNSIGNED_PKG_PATH="$WORK_DIR/OpenClawSetup-macOS-unsigned.pkg"
+
+if [[ -n "$APP_SIGN_IDENTITY" ]]; then
+  if ! command -v codesign >/dev/null 2>&1; then
+    echo "codesign was not found, but OPENCLAW_MACOS_APP_SIGN_IDENTITY is set." >&2
+    exit 1
+  fi
+
+  echo "Signing app bundle with identity: $APP_SIGN_IDENTITY"
+  codesign --force --deep --timestamp --options runtime --sign "$APP_SIGN_IDENTITY" "$APP_DIR"
+  codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+fi
 
 pkgbuild \
   --root "$ROOT_DIR" \
   --scripts "$REPO_ROOT/macos/pkg-scripts" \
   --identifier "ai.openclaw.installer.macos" \
   --version "$VERSION" \
-  "$PKG_PATH"
+  "$UNSIGNED_PKG_PATH"
+
+if [[ -n "$PKG_SIGN_IDENTITY" ]]; then
+  if ! command -v productsign >/dev/null 2>&1; then
+    echo "productsign was not found, but OPENCLAW_MACOS_PKG_SIGN_IDENTITY is set." >&2
+    exit 1
+  fi
+
+  echo "Signing installer package with identity: $PKG_SIGN_IDENTITY"
+  productsign --sign "$PKG_SIGN_IDENTITY" "$UNSIGNED_PKG_PATH" "$PKG_PATH"
+  pkgutil --check-signature "$PKG_PATH"
+  rm -f "$UNSIGNED_PKG_PATH"
+else
+  mv "$UNSIGNED_PKG_PATH" "$PKG_PATH"
+fi
 
 echo "Built $PKG_PATH"

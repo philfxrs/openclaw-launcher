@@ -35,10 +35,35 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    env:
+      OPENCLAW_MACOS_APP_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_APP_SIGN_IDENTITY }}
+      OPENCLAW_MACOS_PKG_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_PKG_SIGN_IDENTITY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Import Apple signing certificate
+        if: secrets.MACOS_CERT_P12_BASE64 != '' && secrets.MACOS_CERT_PASSWORD != ''
+        shell: bash
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/macos-signing-cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/openclaw-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 20)"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "OPENCLAW_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build macOS installer
         shell: bash
@@ -46,12 +71,37 @@ jobs:
           chmod +x ./build/Build-macOS-Installer.sh
           ./build/Build-macOS-Installer.sh
 
+      - name: Notarize macOS package
+        if: secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
+          xcrun notarytool submit "$PKG_PATH" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$PKG_PATH"
+          xcrun stapler validate "$PKG_PATH"
+
+      - name: Verify Gatekeeper policy
+        shell: bash
+        run: |
+          PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
+          spctl -a -vv -t install "$PKG_PATH"
+
       - name: Upload macOS installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-installer
           path: artifacts/installer-macos/OpenClawSetup-macOS.pkg
           if-no-files-found: error
+
+      - name: Cleanup signing keychain
+        if: always() && env.OPENCLAW_SIGNING_KEYCHAIN != ''
+        shell: bash
+        run: |
+          security delete-keychain "$OPENCLAW_SIGNING_KEYCHAIN" || true
 
   publish-release:
     runs-on: ubuntu-latest
