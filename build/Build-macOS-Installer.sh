@@ -17,6 +17,7 @@ APP_CONTENTS="$APP_DIR/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_SIGN_IDENTITY="${OPENCLAW_MACOS_APP_SIGN_IDENTITY:-}"
 PKG_SIGN_IDENTITY="${OPENCLAW_MACOS_PKG_SIGN_IDENTITY:-}"
+REQUIRE_SIGNING="${OPENCLAW_MACOS_REQUIRE_SIGNING:-false}"
 
 mkdir -p "$OUTPUT_DIR" "$APP_MACOS"
 rm -rf "$WORK_DIR"
@@ -75,6 +76,18 @@ chmod +x "$REPO_ROOT/macos/pkg-scripts/postinstall"
 VERSION="${OPENCLAW_MACOS_VERSION:-$(git -C "$REPO_ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.0")}"
 PKG_PATH="$OUTPUT_DIR/OpenClawSetup-macOS.pkg"
 UNSIGNED_PKG_PATH="$WORK_DIR/OpenClawSetup-macOS-unsigned.pkg"
+
+if [[ "$REQUIRE_SIGNING" == "true" ]]; then
+  if [[ -z "$APP_SIGN_IDENTITY" ]]; then
+    echo "OPENCLAW_MACOS_APP_SIGN_IDENTITY is required when OPENCLAW_MACOS_REQUIRE_SIGNING=true." >&2
+    exit 1
+  fi
+
+  if [[ -z "$PKG_SIGN_IDENTITY" ]]; then
+    echo "OPENCLAW_MACOS_PKG_SIGN_IDENTITY is required when OPENCLAW_MACOS_REQUIRE_SIGNING=true." >&2
+    exit 1
+  fi
+fi
 
 if [[ -n "$APP_SIGN_IDENTITY" ]]; then
   if ! command -v codesign >/dev/null 2>&1; then

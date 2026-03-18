@@ -60,7 +60,7 @@ chmod +x ./build/Build-macOS-Installer.sh
 
 The macOS installer is designed for fresh systems as well. During postinstall it will attempt to provision missing prerequisites (Homebrew, Node.js 22+, and Git) before running the OpenClaw install/onboarding flow.
 
-For trusted distribution on newer macOS versions, the release workflow also supports signing and notarization when credentials are configured:
+For trusted distribution on newer macOS versions, the release workflow now requires signing and notarization for macOS artifacts. A tag release will fail if these values are missing:
 
 - Repository variables:
   - OPENCLAW_MACOS_APP_SIGN_IDENTITY
@@ -72,7 +72,7 @@ For trusted distribution on newer macOS versions, the release workflow also supp
   - APPLE_TEAM_ID
   - APPLE_APP_SPECIFIC_PASSWORD
 
-If these values are not set, the workflow still builds a macOS package but skips signing/notarization.
+Local manual builds can still run unsigned for testing, but release tags must pass signing + notarization.
 
 ## Automated release
 

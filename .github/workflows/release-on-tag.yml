@@ -36,6 +36,7 @@ jobs:
   build-macos:
     runs-on: macos-latest
     env:
+      OPENCLAW_MACOS_REQUIRE_SIGNING: true
       OPENCLAW_MACOS_APP_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_APP_SIGN_IDENTITY }}
       OPENCLAW_MACOS_PKG_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_PKG_SIGN_IDENTITY }}
       MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
@@ -48,8 +49,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate signing and notarization inputs
+        shell: bash
+        run: |
+          if [[ -z "$OPENCLAW_MACOS_APP_SIGN_IDENTITY" ]]; then
+            echo "Missing repo variable OPENCLAW_MACOS_APP_SIGN_IDENTITY" >&2
+            exit 1
+          fi
+
+          if [[ -z "$OPENCLAW_MACOS_PKG_SIGN_IDENTITY" ]]; then
+            echo "Missing repo variable OPENCLAW_MACOS_PKG_SIGN_IDENTITY" >&2
+            exit 1
+          fi
+
+          if [[ -z "$MACOS_CERT_P12_BASE64" || -z "$MACOS_CERT_PASSWORD" ]]; then
+            echo "Missing secrets MACOS_CERT_P12_BASE64 or MACOS_CERT_PASSWORD" >&2
+            exit 1
+          fi
+
+          if [[ -z "$APPLE_ID" || -z "$APPLE_TEAM_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" ]]; then
+            echo "Missing Apple notarization secrets (APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD)" >&2
+            exit 1
+          fi
+
       - name: Import Apple signing certificate
-        if: env.MACOS_CERT_P12_BASE64 != '' && env.MACOS_CERT_PASSWORD != ''
         shell: bash
         run: |
           CERT_PATH="$RUNNER_TEMP/macos-signing-cert.p12"
@@ -74,7 +97,6 @@ jobs:
           ./build/Build-macOS-Installer.sh
 
       - name: Notarize macOS package
-        if: env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != ''
         shell: bash
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
@@ -83,7 +105,6 @@ jobs:
           xcrun stapler validate "$PKG_PATH"
 
       - name: Verify Gatekeeper policy
-        if: env.OPENCLAW_MACOS_PKG_SIGN_IDENTITY != ''
         shell: bash
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
