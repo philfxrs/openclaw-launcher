@@ -38,17 +38,19 @@ jobs:
     env:
       OPENCLAW_MACOS_APP_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_APP_SIGN_IDENTITY }}
       OPENCLAW_MACOS_PKG_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_PKG_SIGN_IDENTITY }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Import Apple signing certificate
-        if: secrets.MACOS_CERT_P12_BASE64 != '' && secrets.MACOS_CERT_PASSWORD != ''
+        if: env.MACOS_CERT_P12_BASE64 != '' && env.MACOS_CERT_PASSWORD != ''
         shell: bash
-        env:
-          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
         run: |
           CERT_PATH="$RUNNER_TEMP/macos-signing-cert.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/openclaw-signing.keychain-db"
@@ -72,12 +74,8 @@ jobs:
           ./build/Build-macOS-Installer.sh
 
       - name: Notarize macOS package
-        if: secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        if: env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != ''
         shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
           xcrun notarytool submit "$PKG_PATH" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
