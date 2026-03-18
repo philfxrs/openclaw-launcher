@@ -1,0 +1,5 @@
+artifacts/
+resources/manifests/dependencies.json
+resources/upstream/openclaw-install.ps1
+resources/upstream/openclaw-install.manifest.json
+*.log
