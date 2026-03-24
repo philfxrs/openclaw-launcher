@@ -35,6 +35,9 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    outputs:
+      configured: ${{ steps.macos_config.outputs.available }}
+      missing_inputs: ${{ steps.macos_config.outputs.missing }}
     env:
       OPENCLAW_MACOS_REQUIRE_SIGNING: true
       OPENCLAW_MACOS_APP_SIGN_IDENTITY: ${{ vars.OPENCLAW_MACOS_APP_SIGN_IDENTITY }}
@@ -49,30 +52,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate signing and notarization inputs
+      - name: Detect signing and notarization inputs
+        id: macos_config
         shell: bash
         run: |
+          missing=()
+
           if [[ -z "$OPENCLAW_MACOS_APP_SIGN_IDENTITY" ]]; then
-            echo "Missing repo variable OPENCLAW_MACOS_APP_SIGN_IDENTITY" >&2
-            exit 1
+            missing+=("OPENCLAW_MACOS_APP_SIGN_IDENTITY")
           fi
 
           if [[ -z "$OPENCLAW_MACOS_PKG_SIGN_IDENTITY" ]]; then
-            echo "Missing repo variable OPENCLAW_MACOS_PKG_SIGN_IDENTITY" >&2
-            exit 1
+            missing+=("OPENCLAW_MACOS_PKG_SIGN_IDENTITY")
           fi
 
           if [[ -z "$MACOS_CERT_P12_BASE64" || -z "$MACOS_CERT_PASSWORD" ]]; then
-            echo "Missing secrets MACOS_CERT_P12_BASE64 or MACOS_CERT_PASSWORD" >&2
-            exit 1
+            missing+=("MACOS_CERT_P12_BASE64/MACOS_CERT_PASSWORD")
           fi
 
           if [[ -z "$APPLE_ID" || -z "$APPLE_TEAM_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" ]]; then
-            echo "Missing Apple notarization secrets (APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD)" >&2
-            exit 1
+            missing+=("APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD")
+          fi
+
+          if (( ${#missing[@]} > 0 )); then
+            missing_csv=$(IFS=, ; echo "${missing[*]}")
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "missing=$missing_csv" >> "$GITHUB_OUTPUT"
+            echo "macOS signing/notarization configuration is incomplete; macOS release artifact will be skipped." >&2
+            echo "Missing inputs: $missing_csv" >&2
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "missing=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Import Apple signing certificate
+        if: steps.macos_config.outputs.available == 'true'
         shell: bash
         run: |
           CERT_PATH="$RUNNER_TEMP/macos-signing-cert.p12"
@@ -91,12 +105,14 @@ jobs:
           echo "OPENCLAW_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build macOS installer
+        if: steps.macos_config.outputs.available == 'true'
         shell: bash
         run: |
           chmod +x ./build/Build-macOS-Installer.sh
           ./build/Build-macOS-Installer.sh
 
       - name: Notarize macOS package
+        if: steps.macos_config.outputs.available == 'true'
         shell: bash
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
@@ -105,12 +121,14 @@ jobs:
           xcrun stapler validate "$PKG_PATH"
 
       - name: Verify Gatekeeper policy
+        if: steps.macos_config.outputs.available == 'true'
         shell: bash
         run: |
           PKG_PATH="artifacts/installer-macos/OpenClawSetup-macOS.pkg"
           spctl -a -vv -t install "$PKG_PATH"
 
       - name: Upload macOS installer artifact
+        if: steps.macos_config.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: macos-installer
@@ -137,6 +155,7 @@ jobs:
           path: release-assets
 
       - name: Download macOS installer
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: macos-installer
@@ -154,37 +173,51 @@ jobs:
             exit 1
           fi
 
-          if [[ ! -f "$MAC" ]]; then
-            echo "Missing macOS installer: $MAC" >&2
-            exit 1
-          fi
-
           WIN_HASH=$(sha256sum "$WIN" | awk '{print $1}')
-          MAC_HASH=$(sha256sum "$MAC" | awk '{print $1}')
           WIN_SIZE=$(stat -c%s "$WIN")
-          MAC_SIZE=$(stat -c%s "$MAC")
+          MAC_PRESENT=false
+
+          if [[ -f "$MAC" ]]; then
+            MAC_HASH=$(sha256sum "$MAC" | awk '{print $1}')
+            MAC_SIZE=$(stat -c%s "$MAC")
+            MAC_PRESENT=true
+          else
+            MAC_HASH=
+            MAC_SIZE=
+          fi
 
           {
             echo "win_hash=$WIN_HASH"
-            echo "mac_hash=$MAC_HASH"
             echo "win_size=$WIN_SIZE"
+            echo "mac_hash=$MAC_HASH"
             echo "mac_size=$MAC_SIZE"
+            echo "mac_present=$MAC_PRESENT"
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo "OpenClaw 自动构建发布（Windows + macOS）。"
+            if [[ "$MAC_PRESENT" == "true" ]]; then
+              echo "OpenClaw 自动构建发布（Windows + macOS）。"
+            else
+              echo "OpenClaw 自动构建发布（Windows）。"
+            fi
             echo
             echo "## 下载"
             echo "- Windows: OpenClawSetup.exe"
-            echo "- macOS: OpenClawSetup-macOS.pkg"
+            if [[ "$MAC_PRESENT" == "true" ]]; then
+              echo "- macOS: OpenClawSetup-macOS.pkg"
+            else
+              echo "- macOS: 本次未包含。GitHub 仓库尚未配置完整的 macOS 签名与 notarization 参数。"
+            fi
             echo
             echo "## 文件校验"
             echo "- OpenClawSetup.exe"
             echo "  - 大小(字节): $WIN_SIZE"
             echo "  - SHA256: $WIN_HASH"
-            echo "- OpenClawSetup-macOS.pkg"
-            echo "  - 大小(字节): $MAC_SIZE"
-            echo "  - SHA256: $MAC_HASH"
+            if [[ "$MAC_PRESENT" == "true" ]]; then
+              echo "- OpenClawSetup-macOS.pkg"
+              echo "  - 大小(字节): $MAC_SIZE"
+              echo "  - SHA256: $MAC_HASH"
+            fi
           } > release-notes.md
 
       - name: Publish release
@@ -196,6 +229,6 @@ jobs:
           files: |
             release-assets/OpenClawSetup.exe
             release-assets/OpenClawSetup-macOS.pkg
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
