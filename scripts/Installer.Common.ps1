@@ -1,21 +1,206 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:Utf8NoBomEncoding = New-Object System.Text.UTF8Encoding($false)
+$script:InstallerSession = $null
+
+function Initialize-ConsoleEncoding {
+    try {
+        [Console]::InputEncoding = $script:Utf8NoBomEncoding
+        [Console]::OutputEncoding = $script:Utf8NoBomEncoding
+    } catch {
+    }
+
+    try {
+        $global:OutputEncoding = $script:Utf8NoBomEncoding
+    } catch {
+    }
+}
+
+function Set-Utf8FileContent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [AllowEmptyString()]
+        [string]$Content
+    )
+
+    $directory = Split-Path -Parent $Path
+    if ($directory) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    [System.IO.File]::WriteAllText($Path, $Content, $script:Utf8NoBomEncoding)
+}
+
+function Add-Utf8FileContent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [AllowEmptyString()]
+        [string]$Content
+    )
+
+    $directory = Split-Path -Parent $Path
+    if ($directory) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    [System.IO.File]::AppendAllText($Path, $Content, $script:Utf8NoBomEncoding)
+}
+
+function New-InstallerException {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Code,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [System.Exception]$InnerException
+    )
+
+    $exception = if ($InnerException) {
+        New-Object System.Exception($Message, $InnerException)
+    } else {
+        New-Object System.Exception($Message)
+    }
+
+    $exception.Data['OpenClawErrorCode'] = $Code
+    return $exception
+}
+
+function Get-InstallerErrorCode {
+    param(
+        [System.Exception]$Exception,
+        [string]$DefaultCode = 'E1001'
+    )
+
+    $current = $Exception
+    while ($current) {
+        if ($current.Data.Contains('OpenClawErrorCode')) {
+            return [string]$current.Data['OpenClawErrorCode']
+        }
+
+        $current = $current.InnerException
+    }
+
+    return $DefaultCode
+}
+
+function Initialize-InstallerSession {
+    param(
+        [string]$ProductName = 'OpenClawInstaller',
+        [string]$LogRoot = (Join-Path $env:ProgramData 'OpenClawInstaller\Logs')
+    )
+
+    Initialize-ConsoleEncoding
+
+    New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $session = [ordered]@{
+        productName = $ProductName
+        logRoot = $LogRoot
+        textLogPath = Join-Path $LogRoot ("install-" + $timestamp + '.log')
+        jsonLogPath = Join-Path $LogRoot ("install-" + $timestamp + '.jsonl')
+        transcriptPath = Join-Path $LogRoot ("install-" + $timestamp + '.transcript.log')
+        currentStepId = 'bootstrap'
+        currentStepNumber = 0
+        currentStepName = 'Bootstrap'
+    }
+
+    $script:InstallerSession = $session
+    Write-Log -Message ("Installer session initialized. Text log: {0}; JSON log: {1}" -f $session.textLogPath, $session.jsonLogPath)
+    return [pscustomobject]$session
+}
+
+function Set-InstallerStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StepId,
+        [Parameter(Mandatory = $true)]
+        [string]$StepName,
+        [int]$StepNumber = 0
+    )
+
+    if (-not $script:InstallerSession) {
+        return
+    }
+
+    $script:InstallerSession.currentStepId = $StepId
+    $script:InstallerSession.currentStepName = $StepName
+    $script:InstallerSession.currentStepNumber = $StepNumber
+}
+
+function Write-StructuredLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [Parameter(Mandatory = $true)]
+        [string]$Level,
+        [string]$Code,
+        [hashtable]$Data
+    )
+
+    if (-not $script:InstallerSession) {
+        return
+    }
+
+    $payload = [ordered]@{
+        timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+        level = $Level
+        code = $Code
+        stepId = $script:InstallerSession.currentStepId
+        stepNumber = $script:InstallerSession.currentStepNumber
+        stepName = $script:InstallerSession.currentStepName
+        message = $Message
+        data = $Data
+    }
+
+    Add-Utf8FileContent -Path $script:InstallerSession.jsonLogPath -Content (($payload | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine)
+}
+
+function Read-InstallState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    return (Get-Content -Path $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
         [ValidateSet('INFO', 'WARN', 'ERROR', 'SUCCESS')]
-        [string]$Level = 'INFO'
+        [string]$Level = 'INFO',
+        [string]$Code,
+        [hashtable]$Data
     )
 
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line = "[$timestamp] [$Level] $Message"
+    $prefix = if ($Code) { "[$timestamp] [$Level] [$Code]" } else { "[$timestamp] [$Level]" }
+    if ($script:InstallerSession -and $script:InstallerSession.currentStepNumber -gt 0) {
+        $prefix += " [STEP $($script:InstallerSession.currentStepNumber):$($script:InstallerSession.currentStepId)]"
+    } elseif ($script:InstallerSession -and $script:InstallerSession.currentStepId) {
+        $prefix += " [$($script:InstallerSession.currentStepId)]"
+    }
+
+    $line = "$prefix $Message"
     switch ($Level) {
         'ERROR' { Write-Host $line -ForegroundColor Red }
         'WARN' { Write-Host $line -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $line -ForegroundColor Green }
         default { Write-Host $line -ForegroundColor Gray }
+    }
+
+    if ($script:InstallerSession) {
+        Add-Utf8FileContent -Path $script:InstallerSession.textLogPath -Content ($line + [Environment]::NewLine)
+        Write-StructuredLog -Message $Message -Level $Level -Code $Code -Data $Data
     }
 }
 
@@ -97,12 +282,30 @@ function Save-JsonFile {
         New-Item -ItemType Directory -Force -Path $directory | Out-Null
     }
 
-    $InputObject | ConvertTo-Json -Depth 8 | Set-Content -Path $Path -Encoding UTF8
+    Set-Utf8FileContent -Path $Path -Content ($InputObject | ConvertTo-Json -Depth 8)
 }
 
 function New-InstallState {
     return [ordered]@{
+        schemaVersion = 2
         startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        lastUpdatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        completedAtUtc = $null
+        installRoot = $null
+        mode = 'Auto'
+        logPaths = [ordered]@{
+            text = $null
+            json = $null
+            transcript = $null
+        }
+        steps = [ordered]@{}
+        dependencies = [ordered]@{
+            node = $null
+            npm = $null
+            git = $null
+            webview2 = $null
+            openclaw = $null
+        }
         nodeInstalledByBootstrap = $false
         nodeProductCode = $null
         gitInstalledByBootstrap = $false
@@ -112,6 +315,7 @@ function New-InstallState {
         launcherValidated = $false
         shortcuts = @()
         lastError = $null
+        lastErrorCode = $null
     }
 }
 
@@ -123,12 +327,63 @@ function Save-InstallState {
         [string]$Path
     )
 
+    $State.lastUpdatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     Save-JsonFile -InputObject $State -Path $Path
 }
 
+function Update-InstallStateStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$StepId,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('pending', 'running', 'completed', 'failed', 'skipped')]
+        [string]$Status,
+        [string]$Code,
+        [string]$Message
+    )
+
+    if (-not $State.steps) {
+        $State.steps = [ordered]@{}
+    }
+
+    $existing = $State.steps.$StepId
+    if (-not $existing) {
+        $existing = [ordered]@{
+            startedAtUtc = $null
+            completedAtUtc = $null
+            status = 'pending'
+            code = $null
+            message = $null
+        }
+    }
+
+    if ($Status -eq 'running' -and -not $existing.startedAtUtc) {
+        $existing.startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+
+    if ($Status -in @('completed', 'failed', 'skipped')) {
+        $existing.completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        if (-not $existing.startedAtUtc) {
+            $existing.startedAtUtc = $existing.completedAtUtc
+        }
+    }
+
+    $existing.status = $Status
+    $existing.code = $Code
+    $existing.message = $Message
+    $State.steps.$StepId = $existing
+}
+
 function Get-NodeVersionInfo {
+    $nodePath = Get-NodeCommandPath
+    if (-not $nodePath) {
+        return $null
+    }
+
     try {
-        $raw = (& node -v 2>$null)
+        $raw = (& $nodePath -v 2>$null)
         if (-not $raw) {
             return $null
         }
@@ -143,16 +398,32 @@ function Get-NodeVersionInfo {
     }
 }
 
+function Get-NodeCommandPath {
+    return Get-CommandPath -Candidates @('node.exe', 'node') -FallbackPaths @(
+        (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')
+    )
+}
+
 function Get-CommandPath {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$Candidates
+        [string[]]$Candidates,
+        [string[]]$FallbackPaths = @()
     )
+
+    Refresh-ProcessPath
 
     foreach ($candidate in $Candidates) {
         $command = Get-Command $candidate -ErrorAction SilentlyContinue
         if ($command -and $command.Source) {
             return $command.Source
+        }
+    }
+
+    foreach ($fallbackPath in @($FallbackPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        if (Test-Path $fallbackPath) {
+            return $fallbackPath
         }
     }
 
@@ -182,7 +453,11 @@ function Get-OpenClawCommandPath {
 }
 
 function Get-NpmCommandPath {
-    $resolved = Get-CommandPath -Candidates @('npm.cmd', 'npm.exe', 'npm')
+    $resolved = Get-CommandPath -Candidates @('npm.cmd', 'npm.exe', 'npm') -FallbackPaths @(
+        (Join-Path $env:APPDATA 'npm\npm.cmd'),
+        (Join-Path $env:ProgramFiles 'nodejs\npm.cmd'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nodejs\npm.cmd')
+    )
     if (-not $resolved) {
         throw 'npm was not found on PATH.'
     }
@@ -191,18 +466,14 @@ function Get-NpmCommandPath {
 }
 
 function Get-GitCommandPath {
-    $resolved = Get-CommandPath -Candidates @('git.exe', 'git')
+    $resolved = Get-CommandPath -Candidates @('git.exe', 'git') -FallbackPaths @(
+        'C:\Program Files\Git\cmd\git.exe',
+        'C:\Program Files\Git\bin\git.exe',
+        'C:\Program Files (x86)\Git\cmd\git.exe',
+        'C:\Program Files (x86)\Git\bin\git.exe'
+    )
     if ($resolved) {
         return $resolved
-    }
-
-    foreach ($candidate in @(
-        'C:\Program Files\Git\cmd\git.exe',
-        'C:\Program Files\Git\bin\git.exe'
-    )) {
-        if (Test-Path $candidate) {
-            return $candidate
-        }
     }
 
     return $null
@@ -234,6 +505,31 @@ function Get-EdgePath {
     }
 
     return $null
+}
+
+function Get-WebView2RuntimeVersion {
+    $registryCandidates = @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )
+
+    foreach ($registryPath in $registryCandidates) {
+        try {
+            $entry = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+            $version = [string]$entry.pv
+            if (-not [string]::IsNullOrWhiteSpace($version) -and $version -ne '0.0.0.0') {
+                return $version
+            }
+        } catch {
+        }
+    }
+
+    return $null
+}
+
+function Test-WebView2RuntimeInstalled {
+    return [bool](Get-WebView2RuntimeVersion)
 }
 
 function Get-DesktopShortcutPath {
@@ -376,6 +672,12 @@ function Invoke-ExternalCommand {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
 
+    try {
+        $psi.StandardOutputEncoding = $script:Utf8NoBomEncoding
+        $psi.StandardErrorEncoding = $script:Utf8NoBomEncoding
+    } catch {
+    }
+
     if ($EnvironmentVariables) {
         foreach ($pair in $EnvironmentVariables.GetEnumerator()) {
             $psi.Environment[$pair.Key] = [string]$pair.Value
@@ -383,7 +685,7 @@ function Invoke-ExternalCommand {
     }
 
     $displayCommand = Mask-SensitiveText -Text ("Running: {0} {1}" -f $FilePath, ($Arguments -join ' ')) -SensitiveValues $SensitiveValues
-    Write-Log -Message $displayCommand
+    Write-Log -Message $displayCommand -Data @{ command = $FilePath; arguments = $Arguments; workingDirectory = $WorkingDirectory }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
     [void]$process.Start()
@@ -395,7 +697,7 @@ function Invoke-ExternalCommand {
         $displayStdOut = if ($RedactStdOut) { '__OPENCLAW_REDACTED__' } else { Mask-SensitiveText -Text $stdOut.TrimEnd() -SensitiveValues $SensitiveValues }
         foreach ($line in ($displayStdOut -split "`r?`n")) {
             if ($line) {
-                Write-Log -Message $line
+                Write-Log -Message $line -Data @{ stream = 'stdout' }
             }
         }
     }
@@ -404,10 +706,12 @@ function Invoke-ExternalCommand {
         $displayStdErr = Mask-SensitiveText -Text $stdErr.TrimEnd() -SensitiveValues $SensitiveValues
         foreach ($line in ($displayStdErr -split "`r?`n")) {
             if ($line) {
-                Write-Log -Message $line -Level 'WARN'
+                Write-Log -Message $line -Level 'WARN' -Data @{ stream = 'stderr' }
             }
         }
     }
+
+    Write-Log -Message ("Command exited with code {0}" -f $process.ExitCode) -Data @{ command = $FilePath; exitCode = $process.ExitCode; stdout = $stdOut; stderr = $stdErr }
 
     if (-not $AllowNonZeroExit -and $process.ExitCode -ne 0) {
         $maskedFailure = Mask-SensitiveText -Text ("Command failed with exit code {0}: {1} {2}" -f $process.ExitCode, $FilePath, ($Arguments -join ' ')) -SensitiveValues $SensitiveValues
@@ -437,3 +741,5 @@ function Invoke-OpenClaw {
 
     return Invoke-ExternalCommand -FilePath $commandPath -Arguments $Arguments -SensitiveValues $SensitiveValues -RedactStdOut:$RedactStdOut -AllowNonZeroExit:$AllowNonZeroExit
 }
+
+Initialize-ConsoleEncoding

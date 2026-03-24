@@ -1,0 +1,21 @@
+﻿{
+    "generatedAtUtc":  "2026-03-23T23:18:39.5330902Z",
+    "node":  {
+                 "preferredMajor":  24,
+                 "minimumMajor":  22,
+                 "version":  "24.14.0",
+                 "msiUrl":  "https://nodejs.org/dist/v24.14.0/node-v24.14.0-x64.msi",
+                 "sha256":  "e75802e82be6875b03b63377a9e12e4416799d0fb6dd460f0605d29144d386a6"
+             },
+    "git":  {
+                "version":  "2.53.0.2",
+                "installerUrl":  "https://github.com/git-for-windows/git/releases/download/v2.53.0.windows.2/Git-2.53.0.2-64-bit.exe",
+                "installerSha256":  "194362cf24cd0db4b573096108460a34c7f80a20c5f2aa60d06ef817be9f73a1"
+            },
+    "webview2":  {
+                     "packagedInstallerRelativePath":  "resources\\\\tools\\\\webview2\\\\MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+                     "bootstrapperUrl":  null,
+                     "downloadPage":  "https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-the-webview2-runtime",
+                     "installerCommand":  "MicrosoftEdgeWebView2RuntimeInstallerX64.exe /silent /install"
+                 }
+}

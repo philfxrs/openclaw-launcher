@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$RepositoryRoot,
     [int]$PreferredNodeMajor = 24,
@@ -12,7 +12,7 @@ if (-not $RepositoryRoot) {
     $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
 
-$resourcesRoot = Join-Path $RepositoryRoot 'resources'
+$resourcesRoot = Join-Path $RepositoryRoot 'installer\resources'
 $upstreamRoot = Join-Path $resourcesRoot 'upstream'
 $manifestRoot = Join-Path $resourcesRoot 'manifests'
 
@@ -68,6 +68,20 @@ if (-not $shaLine) {
 
 $nodeHash = ($shaLine -split '\s+')[0].Trim()
 
+Write-Host 'Resolving latest Git for Windows metadata'
+$gitRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest'
+$gitInstallerAsset = $gitRelease.assets | Where-Object { $_.name -match '^Git-.*-64-bit\.exe$' } | Select-Object -First 1
+if (-not $gitInstallerAsset) {
+    throw 'Unable to resolve a Git for Windows x64 installer asset.'
+}
+
+$gitDownloadRoot = Join-Path $env:TEMP 'OpenClawInstaller\GitManifest'
+$gitInstallerPath = Join-Path $gitDownloadRoot $gitInstallerAsset.name
+New-Item -ItemType Directory -Force -Path $gitDownloadRoot | Out-Null
+Invoke-WebRequest -UseBasicParsing -Uri $gitInstallerAsset.browser_download_url -OutFile $gitInstallerPath
+$gitHash = (Get-FileHash -Path $gitInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$gitVersion = ($gitInstallerAsset.name -replace '^Git-(.*)-64-bit\.exe$', '$1')
+
 [ordered]@{
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     node = [ordered]@{
@@ -76,6 +90,17 @@ $nodeHash = ($shaLine -split '\s+')[0].Trim()
         version = $nodeVersion
         msiUrl = $nodeMsiUrl
         sha256 = $nodeHash
+    }
+    git = [ordered]@{
+        version = $gitVersion
+        installerUrl = $gitInstallerAsset.browser_download_url
+        installerSha256 = $gitHash
+    }
+    webview2 = [ordered]@{
+        packagedInstallerRelativePath = 'resources\\tools\\webview2\\MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+        bootstrapperUrl = $env:OPENCLAW_WEBVIEW2_BOOTSTRAPPER_URL
+        downloadPage = 'https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-the-webview2-runtime'
+        installerCommand = 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe /silent /install'
     }
 } | ConvertTo-Json -Depth 5 | Set-Content -Path $dependencyManifestPath -Encoding UTF8
 

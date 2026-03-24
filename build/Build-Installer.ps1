@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$RepositoryRoot,
     [switch]$SkipSync,
@@ -29,7 +29,7 @@ if (-not $iscc) {
     throw 'ISCC.exe was not found. Install Inno Setup 6 before building the installer.'
 }
 
-$installerScript = Join-Path $RepositoryRoot 'installer\OpenClawBootstrap.iss'
+$installerScript = Join-Path $RepositoryRoot 'installer\inno\OpenClawSetup.iss'
 Write-Host "Compiling $installerScript"
 $process = Start-Process -FilePath $iscc -ArgumentList @($installerScript) -NoNewWindow -PassThru -Wait
 if ($process.ExitCode -ne 0) {

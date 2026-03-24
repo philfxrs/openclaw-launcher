@@ -5,6 +5,7 @@ This repository contains a real Windows installer pipeline for OpenClaw aimed at
 The deliverable is a single `OpenClawSetup.exe` bootstrapper built with Inno Setup. That installer:
 
 - checks and silently installs missing runtime dependencies
+- installs or validates the Evergreen WebView2 Runtime required by the desktop shell
 - invokes the official OpenClaw Windows installer flow
 - performs non-interactive first-run onboarding for a local gateway
 - validates that OpenClaw can actually launch and show a desktop window
@@ -12,18 +13,26 @@ The deliverable is a single `OpenClawSetup.exe` bootstrapper built with Inno Set
 
 ## Architecture
 
-- `installer/OpenClawBootstrap.iss`
-  Inno Setup bootstrapper that extracts payloads, elevates once, and runs the real install transaction.
-- `bootstrap/Install-OpenClaw.ps1`
-  End-to-end install orchestrator with rollback.
-- `bootstrap/Uninstall-OpenClaw.ps1`
+- `installer/inno/OpenClawSetup.iss`
+  Inno Setup Unicode bootstrapper. Handles UI, privilege elevation, file extraction, bootstrap invocation, and uninstall entry.
+- `installer/powershell/bootstrap.ps1`
+  Main 18-stage installation orchestrator.
+- `installer/powershell/uninstall.ps1`
   Cleanup entry run by the Inno uninstaller.
-- `scripts/*.ps1`
-  Shared install, dependency, onboarding, validation, shortcut, and rollback logic.
+- `installer/powershell/modules/*.psm1`
+  Shared logging, error-code, state, dependency, and process helpers.
+- `installer/powershell/steps/*.ps1`
+  Concrete install steps: dependency detection, dependency install, OpenClaw install, shortcut creation, uninstall cleanup.
+- `installer/validation/*.ps1`
+  Explicit prerequisite, installed-state, and first-launch validation.
+- `installer/docs/local-test-plan.md`
+  Required local distribution-level validation plan before any GitHub release.
+- `installer/docs/release-checklist.md`
+  Release gate checklist that can only be used after local tests pass.
 - `launcher/OpenClawLauncher.cs`
   Native Windows launcher entrypoint used by the desktop shortcut. It starts the OpenClaw gateway and opens the dashboard in an app-style Edge window.
 - `build/*.ps1`
-  Build pipeline to sync upstream assets, compile the launcher, and compile the installer.
+  Build pipeline to sync upstream assets, compile the launcher, execute local installer checks, and compile the installer.
 
 ## Build
 
@@ -49,6 +58,12 @@ powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1 -SkipSigning
+```
+
+5. Run the required pre-release local verification:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build\Test-LocalInstaller.ps1
 ```
 
 5. Build the macOS installer package (`.pkg`) on a macOS machine:
@@ -88,6 +103,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Configure-GitHub-macOS-Signin
   -MacOSPkgSignIdentity 'Developer ID Installer: Your Name (ABCDE12345)'
 ```
 
+## Local Test Gate
+
+GitHub release preparation is explicitly gated behind local verification.
+
+You must not publish `OpenClawSetup.exe` until all of the following are true:
+
+- local sync/build checks pass
+- at least one clean Windows VM or Sandbox install passes
+- dependency auto-install passes
+- automatic launch passes
+- shortcut validation passes
+- logs and error codes are usable
+- Chinese UI and logs show without encoding corruption
+
+See `installer/docs/local-test-plan.md` for the full matrix and `installer/docs/release-checklist.md` for the release gate.
+
 ## Automated release
 
 Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
@@ -97,6 +128,8 @@ Pushing a Git tag that starts with `v` will trigger GitHub Actions to:
 - build `OpenClawSetup-macOS.pkg` on macOS
 - create/update a GitHub Release with both installers attached
 - publish SHA256 and file size for both files in release notes
+
+This step is only allowed after the local test gate has passed.
 
 Example:
 
@@ -116,12 +149,13 @@ git push origin v0.1.1
 ## Runtime flow
 
 1. Inno Setup elevates and extracts the payload.
-2. `Install-OpenClaw.ps1` checks prerequisites.
-3. If Node.js is missing or too old, the installer downloads and silently installs the pinned Node LTS MSI from the generated dependency manifest.
-4. The bootstrap executes the vendored official `https://openclaw.ai/install.ps1` with `-InstallMethod npm -NoOnboard`.
-5. The bootstrap runs official non-interactive onboarding to provision a local gateway token and install the OpenClaw daemon.
-6. The bootstrap validates CLI health, gateway reachability, launcher startup, and shortcut creation.
-7. The launcher opens `http://127.0.0.1:18789/?token=...` in an app-style Edge window.
+2. `bootstrap.ps1` checks administrator privileges and initializes UTF-8 logs.
+3. Dependency detection runs as separate stages for Node.js, npm, Git, and WebView2.
+4. Missing dependencies are downloaded and silently installed.
+5. Dependency validation runs before OpenClaw installation begins.
+6. The bootstrap executes the vendored official `https://openclaw.ai/install.ps1`, unless a healthy existing install can be reused.
+7. The bootstrap performs onboarding, validates the installed state, creates shortcuts, and verifies first launch.
+8. On failure, logs and install state are preserved for retry or repair.
 
 ## Notes
 
@@ -129,3 +163,4 @@ git push origin v0.1.1
 - The installer treats success as "OpenClaw is usable from a desktop shortcut", not merely "a script exited with 0".
 - The installer adds an `Uninstall OpenClaw` Start menu entry and the normal Windows Apps & Features uninstall entry.
 - The uninstaller removes OpenClaw, daemon state, shortcuts, and launcher profile data. It preserves Node.js by default because Node may become a shared machine runtime after installation.
+- When installation fails, the bootstrap keeps logs and the persisted state file so the next run can repair or continue instead of wiping successful dependency installs.
