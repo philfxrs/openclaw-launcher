@@ -14,6 +14,85 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function New-BootstrapFallbackState {
+    return [ordered]@{
+        schemaVersion            = 2
+        startedAtUtc             = (Get-Date).ToUniversalTime().ToString('o')
+        lastUpdatedAtUtc         = (Get-Date).ToUniversalTime().ToString('o')
+        completedAtUtc           = $null
+        installRoot              = $null
+        mode                     = 'Auto'
+        logPaths                 = [ordered]@{ text = $null; json = $null; transcript = $null }
+        steps                    = [ordered]@{}
+        system                   = $null
+        dependencies             = [ordered]@{ node = $null; npm = $null; git = $null; webview2 = $null; openclaw = $null }
+        nodeInstalledByBootstrap = $false
+        nodeProductCode          = $null
+        gitInstalledByBootstrap  = $false
+        gitUninstallerPath       = $null
+        officialInstallComplete  = $false
+        onboardingComplete       = $false
+        launcherValidated        = $false
+        shortcuts                = @()
+        lastError                = $null
+        lastErrorCode            = $null
+    }
+}
+
+function Ensure-BootstrapStateShape {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State
+    )
+
+    if (-not $State.logPaths) {
+        $State.logPaths = [ordered]@{ text = $null; json = $null; transcript = $null }
+    }
+
+    if (-not $State.steps) {
+        $State.steps = [ordered]@{}
+    }
+
+    $stepsContainer = $State.steps
+
+    foreach ($stepId in @(
+        'admin', 'logging', 'system-info', 'check-node', 'check-npm', 'check-git',
+        'check-other', 'dep-install', 'dep-verify', 'official-install',
+        'official-verify', 'shortcuts', 'launch', 'launch-verify', 'complete',
+        'failure', 'preserve-logs'
+    )) {
+        $stepExists = $false
+        if ($stepsContainer -is [System.Collections.IDictionary]) {
+            $stepExists = $stepsContainer.Contains($stepId)
+        } elseif ($stepsContainer.PSObject.Properties[$stepId]) {
+            $stepExists = $true
+        }
+
+        if (-not $stepExists) {
+            $stepState = [ordered]@{
+                startedAtUtc   = $null
+                completedAtUtc = $null
+                status         = 'pending'
+                code           = $null
+                message        = $null
+            }
+
+            if ($stepsContainer -is [System.Collections.IDictionary]) {
+                $stepsContainer[$stepId] = $stepState
+            } else {
+                Add-Member -InputObject $stepsContainer -MemberType NoteProperty -Name $stepId -Value $stepState
+            }
+        }
+    }
+
+    return $State
+}
+
+$stateRoot = Join-Path $env:ProgramData 'OpenClawInstaller'
+$logRoot = Join-Path $stateRoot 'Logs'
+$statePath = $null
+$state = New-BootstrapFallbackState
+
 . (Join-Path $PSScriptRoot 'init.ps1')
 
 if (-not $InstallRoot) {
@@ -29,8 +108,6 @@ if (-not $LauncherPath) {
     $LauncherPath = Join-Path $InstallRoot 'bin\OpenClawLauncher.exe'
 }
 
-$stateRoot = Join-Path $env:ProgramData 'OpenClawInstaller'
-$logRoot = Join-Path $stateRoot 'Logs'
 $statePath = Join-Path $stateRoot 'install-state.json'
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
 
@@ -40,6 +117,8 @@ if ($existingState -and $existingState.schemaVersion -eq 2) {
 } else {
     $state = New-InstallState
 }
+
+$state = Ensure-BootstrapStateShape -State $state
 
 $session = Initialize-InstallerSession -ProductName 'OpenClawInstaller' -LogRoot $logRoot
 $state.installRoot = $InstallRoot
@@ -53,7 +132,15 @@ $exitCode = 0
 $script:BootstrapAdditionalPathEntries = @()
 
 function Save-State {
-    Save-InstallState -State $state -Path $statePath
+    if ($null -eq $state) {
+        $state = New-BootstrapFallbackState
+    }
+
+    $state = Ensure-BootstrapStateShape -State $state
+
+    if ($statePath) {
+        Save-InstallState -State $state -Path $statePath
+    }
 }
 
 function Publish-InstallerFailure {
@@ -135,9 +222,17 @@ trap {
     $exitCode = 1
     $errorCode = Get-InstallerErrorCode -Exception $_.Exception -DefaultCode 'E9001'
 
+    if ($null -eq $state) {
+        $state = New-BootstrapFallbackState
+    }
+
+    $state = Ensure-BootstrapStateShape -State $state
+
     $state.lastError = $_.Exception.Message
     $state.lastErrorCode = $errorCode
-    Save-InstallState -State $state -Path $statePath
+    if ($statePath) {
+        Save-InstallState -State $state -Path $statePath
+    }
 
     Set-InstallerStep -StepId 'failure' -StepName '安装失败处理' -StepNumber 17
     Update-InstallStateStep -State $state -StepId 'failure' -Status 'completed' -Code $errorCode -Message $_.Exception.Message
@@ -149,7 +244,7 @@ trap {
     Update-InstallStateStep -State $state -StepId 'preserve-logs' -Status 'completed' -Code $errorCode -Message 'State and logs preserved for retry.'
     Save-State
     Write-Log -Message 'Rollback policy: preserve-for-resume. No destructive cleanup performed.' -Level 'WARN' -Code 'E9001'
-    Write-Log -Message ('日志文件: {0}' -f $state.logPaths.text) -Level 'INFO'
+    Write-Log -Message ('日志文件: {0}' -f $(if ($state.logPaths.text) { $state.logPaths.text } else { $logRoot })) -Level 'INFO'
     Publish-InstallerFailure -Code $errorCode -Message $_.Exception.Message
     exit $exitCode
 }

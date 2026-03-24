@@ -55,6 +55,20 @@ if (-not $openclawPath) {
     throw (New-InstallerException -Code 'E3001' -Message 'OpenClaw install script completed, but the openclaw command is not available on PATH.')
 }
 
+function Test-GatewayReachable {
+    return (Test-HttpEndpoint -Url 'http://127.0.0.1:18789/' -TimeoutSeconds 5)
+}
+
+function Start-UserSessionGateway {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OpenClawCommandPath
+    )
+
+    Write-Log -Message 'Gateway daemon is unavailable; starting OpenClaw gateway in the current user session.' -Level 'WARN'
+    Start-Process -FilePath $OpenClawCommandPath -ArgumentList 'gateway' -WindowStyle Hidden | Out-Null
+}
+
 $version = (Invoke-OpenClaw -Arguments @('--version')).StdOut.Trim()
 Write-Log -Message "Official OpenClaw install completed: $version" -Level 'SUCCESS'
 
@@ -71,26 +85,39 @@ if (-not $SkipOnboard) {
     if ($existingToken) {
         Write-Log -Message 'Existing OpenClaw gateway token detected; reusing configuration.'
         Invoke-OpenClaw -Arguments @('doctor', '--non-interactive') -AllowNonZeroExit | Out-Null
-        Invoke-OpenClaw -Arguments @('gateway', 'install', '--force') | Out-Null
-        Invoke-OpenClaw -Arguments @('gateway', 'start') | Out-Null
+        try {
+            Invoke-OpenClaw -Arguments @('gateway', 'install', '--force') | Out-Null
+        } catch {
+            Write-Log -Message ("Gateway daemon install did not complete cleanly: {0}" -f $_.Exception.Message) -Level 'WARN'
+        }
+
+        Invoke-OpenClaw -Arguments @('gateway', 'start') -AllowNonZeroExit | Out-Null
         $gatewayToken = $existingToken
     } else {
         Write-Log -Message 'Running non-interactive onboarding for a local gateway'
-        Invoke-OpenClaw -Arguments @(
-            'onboard',
-            '--non-interactive',
-            '--mode', 'local',
-            '--flow', 'quickstart',
-            '--auth-choice', 'skip',
-            '--gateway-auth', 'token',
-            '--gateway-token', $gatewayToken,
-            '--install-daemon',
-            '--accept-risk'
-        ) -SensitiveValues @($gatewayToken) | Out-Null
+        try {
+            Invoke-OpenClaw -Arguments @(
+                'onboard',
+                '--non-interactive',
+                '--mode', 'local',
+                '--flow', 'quickstart',
+                '--auth-choice', 'skip',
+                '--gateway-auth', 'token',
+                '--gateway-token', $gatewayToken,
+                '--install-daemon',
+                '--accept-risk'
+            ) -SensitiveValues @($gatewayToken) | Out-Null
+        } catch {
+            Write-Log -Message ("Non-interactive onboarding did not complete cleanly: {0}" -f $_.Exception.Message) -Level 'WARN'
+        }
+    }
+
+    if (-not (Test-GatewayReachable)) {
+        Start-UserSessionGateway -OpenClawCommandPath $openclawPath
     }
 
     Wait-Until -Description 'OpenClaw gateway HTTP endpoint' -TimeoutSeconds 90 -PollSeconds 3 -Condition {
-        return (Test-HttpEndpoint -Url 'http://127.0.0.1:18789/' -TimeoutSeconds 5)
+        return (Test-GatewayReachable)
     }
 
     Write-Log -Message 'OpenClaw local gateway is reachable.' -Level 'SUCCESS'

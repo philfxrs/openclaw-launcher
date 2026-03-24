@@ -77,6 +77,7 @@ var
   BootstrapResultCode: Integer;
   BootstrapFailureMessage: String;
   BootstrapFailureCode: String;
+  BootstrapDidFail: Boolean;
 
 (* ── Log Memo Helper ──────────────────────────────────────────────── *)
 
@@ -85,11 +86,18 @@ begin
   if Trim(S) = '' then
     Exit;
 
-  if InstallLogMemo.Lines.Count > 500 then
-    InstallLogMemo.Lines.Delete(0);
+  if InstallLogMemo = nil then
+    Exit;
 
-  InstallLogMemo.Lines.Add(S);
-  WizardForm.Update;
+  try
+    if InstallLogMemo.Lines.Count > 500 then
+      InstallLogMemo.Lines.Delete(0);
+
+    InstallLogMemo.Lines.Add(S);
+    WizardForm.Update;
+  except
+    Log('Bootstrap UI log update failed: ' + GetExceptionMessage);
+  end;
 end;
 
 (* ── Pipe-delimited field parser ──────────────────────────────────── *)
@@ -105,6 +113,70 @@ begin
   end else begin
     Result := Copy(S, 1, P - 1);
     Delete(S, 1, P);
+  end;
+end;
+
+function GetBootstrapLogRoot: String;
+begin
+  Result := ExpandConstant('{commonappdata}\OpenClawInstaller\Logs');
+end;
+
+function LooksLikeUnreadableFailureText(const Value: String): Boolean;
+begin
+  Result :=
+    (Trim(Value) = '') or
+    (Pos('�', Value) > 0);
+end;
+
+function GetDefaultFailureSummary(const FailureCode: String): String;
+begin
+  if FailureCode <> '' then
+    Result := '错误码 ' + FailureCode + '：安装过程中出现外部命令错误。请查看日志获取详细信息：' + #13#10 + GetBootstrapLogRoot
+  else
+    Result := 'OpenClaw 安装失败。请查看日志获取详细信息：' + #13#10 + GetBootstrapLogRoot;
+end;
+
+function ClampPercent(const Value: Integer): Integer;
+begin
+  if Value < 0 then
+    Result := 0
+  else if Value > 100 then
+    Result := 100
+  else
+    Result := Value;
+end;
+
+procedure SafeSetInstallProgress(const StageMessage: String; const PercentValue: Integer);
+begin
+  if InstallProgressPage = nil then
+    Exit;
+
+  try
+    InstallProgressPage.SetText(StageMessage, '所有安装步骤都在当前窗口内执行，请勿关闭。');
+    InstallProgressPage.SetProgress(ClampPercent(PercentValue), 100);
+  except
+    Log('Bootstrap progress UI update failed: ' + GetExceptionMessage);
+  end;
+end;
+
+procedure RestoreWizardButtons;
+begin
+  WizardForm.BackButton.Enabled := True;
+  WizardForm.NextButton.Enabled := True;
+  WizardForm.CancelButton.Enabled := True;
+end;
+
+procedure SafeCloseBootstrapUi;
+begin
+  RestoreWizardButtons;
+
+  if InstallProgressPage = nil then
+    Exit;
+
+  try
+    InstallProgressPage.Hide;
+  except
+    Log('Bootstrap page hide failed: ' + GetExceptionMessage);
   end;
 end;
 
@@ -172,7 +244,11 @@ begin
   if Pos('@@OPENCLAW_ERROR|', Line) = 1 then begin
     Delete(Line, 1, Length('@@OPENCLAW_ERROR|'));
     BootstrapFailureCode := PopField(Line);
-    BootstrapFailureMessage := Line;
+    BootstrapFailureMessage := Trim(Line);
+    if BootstrapFailureCode = '' then
+      BootstrapFailureCode := 'E9001';
+    if LooksLikeUnreadableFailureText(BootstrapFailureMessage) then
+      BootstrapFailureMessage := GetDefaultFailureSummary(BootstrapFailureCode);
     AppendInstallLog('[错误] [' + BootstrapFailureCode + '] ' + BootstrapFailureMessage);
     Exit;
   end;
@@ -182,11 +258,10 @@ begin
     Delete(Line, 1, Length('@@OPENCLAW_STAGE|'));
     StageId := PopField(Line);
     PercentText := PopField(Line);
-    StageMessage := Line;
+    StageMessage := Trim(Line);
     PercentValue := StrToIntDef(PercentText, 0);
     StageMessage := GetStageCaption(StageId, StageMessage);
-    InstallProgressPage.SetText(StageMessage, '所有安装步骤都在当前窗口内执行，请勿关闭。');
-    InstallProgressPage.SetProgress(PercentValue, 100);
+    SafeSetInstallProgress(StageMessage, PercentValue);
     AppendInstallLog('[' + StageId + '] ' + StageMessage);
     Exit;
   end;
@@ -207,11 +282,18 @@ begin
   BootstrapResultCode := -1;
   BootstrapFailureMessage := '';
   BootstrapFailureCode := '';
+  BootstrapDidFail := False;
 
-  InstallLogMemo.Lines.Clear;
-  InstallProgressPage.SetText('正在准备 OpenClaw 安装环境...', '请勿关闭此窗口。');
-  InstallProgressPage.SetProgress(0, 100);
-  InstallProgressPage.Show;
+  if InstallLogMemo <> nil then begin
+    try
+      InstallLogMemo.Lines.Clear;
+    except
+      Log('Bootstrap log clear failed: ' + GetExceptionMessage);
+    end;
+  end;
+  SafeSetInstallProgress('正在准备 OpenClaw 安装环境...', 0);
+  if InstallProgressPage <> nil then
+    InstallProgressPage.Show;
 
   WizardForm.BackButton.Enabled := False;
   WizardForm.NextButton.Enabled := False;
@@ -238,15 +320,16 @@ begin
       @HandleBootstrapOutput
     );
   except
+    BootstrapDidFail := True;
+    SafeCloseBootstrapUi;
     BootstrapFailureMessage := '无法启动 OpenClaw 安装事务: ' + GetExceptionMessage;
     RaiseException(BootstrapFailureMessage);
   end;
 
   if BootstrapResultCode <> 0 then begin
-    if BootstrapFailureMessage = '' then
-      BootstrapFailureMessage :=
-        'OpenClaw 安装失败。请查看日志获取详细信息：' + #13#10 +
-        ExpandConstant('{commonappdata}\OpenClawInstaller\Logs');
+    BootstrapDidFail := True;
+    if LooksLikeUnreadableFailureText(BootstrapFailureMessage) then
+      BootstrapFailureMessage := GetDefaultFailureSummary(BootstrapFailureCode);
 
     if BootstrapFailureCode <> '' then
       BootstrapFailureMessage :=
@@ -254,13 +337,13 @@ begin
         GetStageCaption(BootstrapFailureCode, '') + '）' + #13#10#13#10 +
         BootstrapFailureMessage;
 
+    SafeCloseBootstrapUi;
     RaiseException(BootstrapFailureMessage);
   end;
 
-  InstallProgressPage.SetText('OpenClaw 安装完成。', '正在切换到完成页面。');
-  InstallProgressPage.SetProgress(100, 100);
+  SafeSetInstallProgress('OpenClaw 安装完成。', 100);
   Sleep(600);
-  InstallProgressPage.Hide;
+  SafeCloseBootstrapUi;
 end;
 
 (* ── Wizard Initialization ────────────────────────────────────────── *)
@@ -293,14 +376,25 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
+  if CurStep <> ssPostInstall then
+    Exit;
+
+  try
     RunOpenClawBootstrap;
+  except
+    BootstrapDidFail := True;
+    SafeCloseBootstrapUi;
+    RaiseException(GetExceptionMessage);
+  end;
 end;
 
 (* ── Finished page text ───────────────────────────────────────────── *)
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  if BootstrapDidFail then
+    Exit;
+
   if CurPageID = wpFinished then begin
     WizardForm.FinishedHeadingLabel.Caption := 'OpenClaw 已安装完成';
     WizardForm.FinishedLabel.Caption :=

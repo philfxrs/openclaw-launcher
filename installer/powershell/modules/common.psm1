@@ -336,6 +336,30 @@ function Get-CommandPath {
     return $null
 }
 
+function Test-CommandExecutable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string[]]$VersionArguments = @('--version')
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $false
+    }
+
+    try {
+        $output = & $Path @VersionArguments 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+
+        return -not [string]::IsNullOrWhiteSpace($output.Trim())
+    } catch {
+        return $false
+    }
+}
+
 function Get-OpenClawCommandPath {
     if (Test-ForcedMissingDependency -Name 'OPENCLAW') {
         return $null
@@ -367,13 +391,13 @@ function Get-GitCommandPath {
     }
 
     $resolved = Get-CommandPath -Candidates @('git.exe', 'git')
-    if ($resolved) { return $resolved }
+    if ($resolved -and (Test-CommandExecutable -Path $resolved)) { return $resolved }
 
     foreach ($candidate in @(
         'C:\Program Files\Git\cmd\git.exe',
         'C:\Program Files\Git\bin\git.exe'
     )) {
-        if (Test-Path $candidate) { return $candidate }
+        if ((Test-Path $candidate) -and (Test-CommandExecutable -Path $candidate)) { return $candidate }
     }
 
     return $null
@@ -548,6 +572,66 @@ function Wait-Until {
     throw "Timed out waiting for $Description."
 }
 
+function Test-TextLooksCorrupted {
+    [CmdletBinding()]
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return ($Text.Contains([char]0xFFFD) -or $Text -match '�{2,}')
+}
+
+function Get-ExternalCommandFailureSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode,
+        [string]$StdErr,
+        [string]$StdOut
+    )
+
+    $reason = $null
+    foreach ($candidate in @($StdErr, $StdOut)) {
+        foreach ($line in ($candidate -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmed)) {
+                continue
+            }
+
+            if (-not (Test-TextLooksCorrupted -Text $trimmed)) {
+                $reason = $trimmed
+                break
+            }
+        }
+
+        if ($reason) {
+            break
+        }
+    }
+
+    if (-not $reason) {
+        $commandName = [System.IO.Path]::GetFileName($FilePath)
+        $argumentText = [string]::Join(' ', $Arguments)
+
+        if ($commandName -ieq 'git.exe' -or $commandName -ieq 'git') {
+            $reason = 'Git command could not be executed successfully.'
+        } elseif (($commandName -like 'openclaw*') -and ($argumentText -match 'gateway\s+install')) {
+            $reason = 'OpenClaw gateway daemon setup did not complete successfully.'
+        } else {
+            $reason = 'External command returned an error. See installer log for details.'
+        }
+    }
+
+    return ('Command failed (exit {0}): {1}' -f $ExitCode, $reason)
+}
+
 # ══════════════════════════════════════════════════════════════════════════
 #  External Process Execution
 # ══════════════════════════════════════════════════════════════════════════
@@ -615,8 +699,21 @@ function Invoke-ExternalCommand {
 
     if ($stdErr) {
         $displayErr = Mask-SensitiveText -Text $stdErr.TrimEnd() -SensitiveValues $SensitiveValues
+        $loggedUnreadableStdErr = $false
         foreach ($line in ($displayErr -split "`r?`n")) {
-            if ($line) { Write-Log -Message $line -Level 'WARN' -Data @{ stream = 'stderr' } }
+            if (-not $line) {
+                continue
+            }
+
+            if (Test-TextLooksCorrupted -Text $line) {
+                if (-not $loggedUnreadableStdErr) {
+                    Write-Log -Message 'A subprocess returned unreadable error text. The installer will use a stable failure summary and preserve the log path.' -Level 'WARN' -Data @{ stream = 'stderr'; readable = $false }
+                    $loggedUnreadableStdErr = $true
+                }
+                continue
+            }
+
+            Write-Log -Message $line -Level 'WARN' -Data @{ stream = 'stderr'; readable = $true }
         }
     }
 
@@ -624,7 +721,7 @@ function Invoke-ExternalCommand {
 
     if (-not $AllowNonZeroExit -and $process.ExitCode -ne 0) {
         $maskedFailure = Mask-SensitiveText -Text (
-            "Command failed (exit {0}): {1} {2}" -f $process.ExitCode, $FilePath, ($Arguments -join ' ')
+            Get-ExternalCommandFailureSummary -FilePath $FilePath -Arguments $Arguments -ExitCode $process.ExitCode -StdErr $stdErr -StdOut $stdOut
         ) -SensitiveValues $SensitiveValues
         throw $maskedFailure
     }
@@ -667,10 +764,10 @@ Export-ModuleMember -Function `
     Refresh-ProcessPath, `
     Read-JsonFile, Save-JsonFile, `
     New-InstallState, Read-InstallState, Save-InstallState, Update-InstallStateStep, `
-    Get-NodeVersionInfo, Get-CommandPath, `
+    Get-NodeVersionInfo, Get-CommandPath, Test-CommandExecutable, `
     Get-OpenClawCommandPath, Get-NpmCommandPath, Get-GitCommandPath, `
     Get-EdgePath, Get-WebView2RuntimeVersion, Test-WebView2RuntimeInstalled, `
     Get-DesktopShortcutPath, Get-StartMenuShortcutPath, `
     New-RandomBase64Token, `
-    Invoke-Retry, Test-HttpEndpoint, Wait-Until, `
+    Invoke-Retry, Test-HttpEndpoint, Wait-Until, Test-TextLooksCorrupted, Get-ExternalCommandFailureSummary, `
     Invoke-ExternalCommand, Invoke-OpenClaw

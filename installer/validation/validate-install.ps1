@@ -40,6 +40,25 @@ $webView2Version = Get-WebView2RuntimeVersion
 $desktopShortcut   = Get-DesktopShortcutPath   -ShortcutName $ShortcutName
 $startMenuShortcut = Get-StartMenuShortcutPath  -ShortcutName $ShortcutName
 
+function Test-OpenClawInitializationComplete {
+    if (-not $openclawPath) {
+        return $false
+    }
+
+    try {
+        $tokenResult = Invoke-OpenClaw -Arguments @('config', 'get', 'gateway.auth.token') -RedactStdOut -AllowNonZeroExit
+        if ($tokenResult.ExitCode -ne 0) {
+            return $false
+        }
+
+        return -not [string]::IsNullOrWhiteSpace($tokenResult.StdOut.Trim())
+    } catch {
+        return $false
+    }
+}
+
+$openclawInitialized = Test-OpenClawInitializationComplete
+
 $result = [ordered]@{
     scenario       = $Scenario
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -63,8 +82,9 @@ $result = [ordered]@{
         version   = $webView2Version
     }
     openclaw = [ordered]@{
-        installed = [bool]$openclawPath
-        path      = $openclawPath
+        installed   = [bool]$openclawPath
+        path        = $openclawPath
+        initialized = $openclawInitialized
     }
     launcher = [ordered]@{
         exists = [bool](Test-Path $LauncherPath)
@@ -106,6 +126,10 @@ if ($Scenario -in @('Installed', 'Launch')) {
 
     if (-not $result.launcher.exists) {
         throw (New-InstallerException -Code 'E3002' -Message ("Launcher executable missing: {0}" -f $LauncherPath))
+    }
+
+    if ($Scenario -eq 'Installed' -and -not $result.openclaw.initialized) {
+        throw (New-InstallerException -Code 'E3002' -Message 'OpenClaw CLI is present, but initial gateway configuration is incomplete. The official install step must run.')
     }
 }
 
