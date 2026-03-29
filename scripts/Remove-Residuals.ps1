@@ -15,7 +15,9 @@ if ($StatePath -and (Test-Path $StatePath)) {
 
 foreach ($shortcutSpec in @(
     @{ path = (Get-DesktopShortcutPath -ShortcutName $ShortcutName); label = 'desktop shortcut' },
-    @{ path = (Get-StartMenuShortcutPath -ShortcutName $ShortcutName); label = 'Start menu shortcut' }
+    @{ path = (Get-StartMenuShortcutPath -ShortcutName $ShortcutName); label = 'Start menu shortcut' },
+    @{ path = (Get-DesktopShortcutPath -ShortcutName "配置 $ShortcutName"); label = 'configurator desktop shortcut' },
+    @{ path = (Get-StartMenuShortcutPath -ShortcutName "配置 $ShortcutName"); label = 'configurator Start menu shortcut' }
 )) {
     $shortcutPath = $shortcutSpec.path
     if (Test-Path $shortcutPath) {
@@ -66,9 +68,23 @@ if (Test-Path $gatewayScript) {
 }
 
 if (Test-Path $openclawHome) {
+    # Preserve user config backups created by the configurator
+    $configBackupsDir = Join-Path $openclawHome 'config-backups'
+    $hasBackups = Test-Path $configBackupsDir
+
     try {
-        Remove-Item -Recurse -Force $openclawHome
-        Write-Log -Message "Removed OpenClaw home: $openclawHome"
+        Get-ChildItem -Path $openclawHome -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.FullName.StartsWith($configBackupsDir, [System.StringComparison]::OrdinalIgnoreCase) } |
+            Sort-Object { $_.FullName.Length } -Descending |
+            ForEach-Object {
+                try { Remove-Item -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch {}
+            }
+
+        if (-not $hasBackups) {
+            Remove-Item -Recurse -Force $openclawHome -ErrorAction SilentlyContinue
+        }
+
+        Write-Log -Message "Removed OpenClaw home: $openclawHome (config-backups preserved: $hasBackups)"
     } catch {
         Write-Log -Message "OpenClaw home cleanup skipped: $openclawHome" -Level 'WARN'
     }
@@ -78,6 +94,11 @@ $launcherDataRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationDat
 if (Test-Path $launcherDataRoot) {
     Get-Process -Name 'OpenClawLauncher' -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Log -Message "Stopping OpenClaw launcher process $($_.Id)"
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    Get-Process -Name 'OpenClawConfigurator' -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Log -Message "Stopping OpenClaw configurator process $($_.Id)"
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
 

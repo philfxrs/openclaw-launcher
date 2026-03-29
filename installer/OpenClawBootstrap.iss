@@ -39,9 +39,11 @@ Source: "..\validation\*"; DestDir: "{app}\validation"; Flags: ignoreversion rec
 Source: "..\shortcuts\*"; DestDir: "{app}\shortcuts"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\artifacts\launcher\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\artifacts\configurator\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\Uninstall OpenClaw"; Filename: "{uninstallexe}"; Comment: "Uninstall OpenClaw"
+Name: "{autoprograms}\配置 OpenClaw"; Filename: "{app}\bin\OpenClawConfigurator.exe"; Comment: "配置 OpenClaw"
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
