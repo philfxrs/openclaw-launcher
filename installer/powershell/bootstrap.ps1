@@ -6,6 +6,9 @@ param(
     [string]$LauncherPath,
     [string]$ShortcutName = 'OpenClaw',
     [string]$Channel = 'latest',
+    [string]$InstallerVersion = '0.1.10',
+    [string]$BuildVersion = '0.1.10',
+    [string]$DiagnosticsUploadUri,
     [ValidateSet('Auto', 'Repair', 'Overwrite', 'SkipIfPresent')]
     [string]$ExistingInstallAction = 'Auto',
     [switch]$SkipLaunchAfterInstall
@@ -107,6 +110,9 @@ if (-not $OfficialScriptPath) {
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path $InstallRoot 'bin\OpenClawLauncher.exe'
 }
+if (-not $DiagnosticsUploadUri) {
+    $DiagnosticsUploadUri = $env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI
+}
 
 $statePath = Join-Path $stateRoot 'install-state.json'
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
@@ -152,6 +158,58 @@ function Publish-InstallerFailure {
     )
 
     Write-Host ('@@OPENCLAW_ERROR|{0}|{1}' -f $Code, $Message)
+}
+
+function Publish-InstallerDiagnostics {
+    param(
+        [string]$ReportId,
+        [string]$LogPath,
+        [string]$UploadStatus
+    )
+
+    Write-Host ('@@OPENCLAW_DIAGNOSTICS|{0}|{1}|{2}' -f $ReportId, $LogPath, $UploadStatus)
+}
+
+function Start-DiagnosticsUpload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SummaryPath,
+        [Parameter(Mandatory = $true)]
+        [string]$UploadUri
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UploadUri) -or -not (Test-Path $SummaryPath)) {
+        return $false
+    }
+
+    $uploadScriptPath = Join-Path $PSScriptRoot 'upload-diagnostics.ps1'
+    $powerShellPath = Join-Path $PSHOME 'powershell.exe'
+    $arguments = @(
+        '-NoLogo'
+        '-NoProfile'
+        '-ExecutionPolicy', 'Bypass'
+        '-WindowStyle', 'Hidden'
+        '-File', $uploadScriptPath
+        '-SummaryPath', $SummaryPath
+        '-UploadUri', $UploadUri
+    )
+
+    $null = Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WindowStyle Hidden
+    return $true
+}
+
+function Get-UserFacingFailureMessage {
+    [CmdletBinding()]
+    param(
+        [string]$ErrorCode
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ErrorCode)) {
+        return 'OpenClaw 安装未能完成。请稍后重试；如果问题持续存在，请重新下载安装包后再试。'
+    }
+
+    return 'OpenClaw 安装未能完成。请稍后重试；如果问题持续存在，请重新下载安装包后再试。'
 }
 
 function Invoke-InstallerPhase {
@@ -220,19 +278,65 @@ function Resolve-OfficialInstallDecision {
 
 trap {
     $exitCode = 1
-    $errorCode = Get-InstallerErrorCode -Exception $_.Exception -DefaultCode 'E9001'
+    $errorCode = 'E9001'
+    $stateValue = if (Get-Variable -Name state -Scope Script -ErrorAction SilentlyContinue) { $script:state } else { $null }
+    $stateRootValue = if (Get-Variable -Name stateRoot -Scope Script -ErrorAction SilentlyContinue) { $script:stateRoot } else { (Join-Path $env:ProgramData 'OpenClawInstaller') }
+    $logRootValue = if (Get-Variable -Name logRoot -Scope Script -ErrorAction SilentlyContinue) { $script:logRoot } else { (Join-Path $stateRootValue 'Logs') }
+    $statePathValue = if (Get-Variable -Name statePath -Scope Script -ErrorAction SilentlyContinue) { $script:statePath } else { $null }
+    $diagnosticsUploadUriValue = if (Get-Variable -Name DiagnosticsUploadUri -Scope Script -ErrorAction SilentlyContinue) { $script:DiagnosticsUploadUri } else { $null }
 
-    if ($null -eq $state) {
-        $state = New-BootstrapFallbackState
+    if (Get-Command Get-InstallerErrorCode -ErrorAction SilentlyContinue) {
+        $errorCode = Get-InstallerErrorCode -Exception $_.Exception -DefaultCode 'E9001'
+    }
+    $localLogPath = if ($stateValue -and $stateValue.logPaths -and $stateValue.logPaths.text) { $stateValue.logPaths.text } else { $logRootValue }
+    $summaryPath = if ($stateValue -and $stateValue.logPaths -and $stateValue.logPaths.text) {
+        [System.IO.Path]::ChangeExtension($stateValue.logPaths.text, '.summary.json')
+    } else {
+        Join-Path $stateRootValue 'diagnostics-summary.json'
+    }
+    $reportId = ''
+    $uploadStatus = if ([string]::IsNullOrWhiteSpace($diagnosticsUploadUriValue)) { 'not-configured' } else { 'failed' }
+    $userFacingFailureMessage = 'OpenClaw 安装未能完成。请稍后重试；如果问题持续存在，请重新下载安装包后再试。'
+
+    if ($null -eq $stateValue) {
+        $stateValue = New-BootstrapFallbackState
     }
 
-    $state = Ensure-BootstrapStateShape -State $state
+    $stateValue = Ensure-BootstrapStateShape -State $stateValue
+    $script:state = $stateValue
 
-    $state.lastError = $_.Exception.Message
-    $state.lastErrorCode = $errorCode
-    if ($statePath) {
-        Save-InstallState -State $state -Path $statePath
+    $stateValue.lastError = $_.Exception.Message
+    $stateValue.lastErrorCode = $errorCode
+    if ($statePathValue) {
+        Save-InstallState -State $stateValue -Path $statePathValue
     }
+
+    Publish-InstallerFailure -Code $errorCode -Message $userFacingFailureMessage
+
+    try {
+        $summary = New-DiagnosticsSummary -State $stateValue -InstallerVersion $InstallerVersion -BuildVersion $BuildVersion -ErrorCode $errorCode -ErrorMessage $_.Exception.Message -LocalLogPath $localLogPath -LocalStatePath $statePathValue
+        Save-JsonFile -InputObject $summary -Path $summaryPath
+        Write-Log -Message ('Diagnostics summary saved: {0}' -f $summaryPath)
+
+        if (-not [string]::IsNullOrWhiteSpace($diagnosticsUploadUriValue)) {
+            try {
+                if (Start-DiagnosticsUpload -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue) {
+                    $uploadStatus = 'scheduled'
+                    Write-Log -Message 'Diagnostics summary upload scheduled in background.' -Level 'INFO'
+                } else {
+                    Write-Log -Message 'Diagnostics summary upload skipped because scheduling prerequisites were not met.' -Level 'WARN'
+                }
+            } catch {
+                Write-Log -Message ('Diagnostics summary upload scheduling failed: {0}' -f $_.Exception.Message) -Level 'WARN'
+            }
+        } else {
+            Write-Log -Message 'Diagnostics upload URI is not configured; summary upload skipped.' -Level 'WARN'
+        }
+    } catch {
+        Write-Log -Message ('Diagnostics summary generation failed: {0}' -f $_.Exception.Message) -Level 'WARN'
+    }
+
+    Publish-InstallerDiagnostics -ReportId $reportId -LogPath $localLogPath -UploadStatus $uploadStatus
 
     Set-InstallerStep -StepId 'failure' -StepName '安装失败处理' -StepNumber 17
     Update-InstallStateStep -State $state -StepId 'failure' -Status 'completed' -Code $errorCode -Message $_.Exception.Message
@@ -245,7 +349,6 @@ trap {
     Save-State
     Write-Log -Message 'Rollback policy: preserve-for-resume. No destructive cleanup performed.' -Level 'WARN' -Code 'E9001'
     Write-Log -Message ('日志文件: {0}' -f $(if ($state.logPaths.text) { $state.logPaths.text } else { $logRoot })) -Level 'INFO'
-    Publish-InstallerFailure -Code $errorCode -Message $_.Exception.Message
     exit $exitCode
 }
 

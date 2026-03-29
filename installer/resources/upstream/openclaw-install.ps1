@@ -1,4 +1,4 @@
-﻿# OpenClaw Installer for Windows
+# OpenClaw Installer for Windows
 # Usage: powershell -c "irm https://openclaw.ai/install.ps1 | iex"
 #        powershell -c "& ([scriptblock]::Create((irm https://openclaw.ai/install.ps1))) -Tag beta -NoOnboard -DryRun"
 

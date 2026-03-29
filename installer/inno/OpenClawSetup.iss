@@ -4,9 +4,10 @@
 ; dependency installation, OpenClaw setup, shortcut creation, and launch.
 
 #define AppName      "OpenClaw"
-#define AppVersion   "0.1.0"
+#define AppVersion   "0.1.10"
 #define AppPublisher "OpenClaw"
 #define AppExeName   "OpenClawLauncher.exe"
+#define DiagnosticsUploadUrl GetEnv("OPENCLAW_DIAGNOSTICS_UPLOAD_URI")
 
 [Setup]
 AppId={{7CF1F280-A558-49C9-B1BE-320D4C3CF8E5}
@@ -78,6 +79,9 @@ var
   BootstrapFailureMessage: String;
   BootstrapFailureCode: String;
   BootstrapDidFail: Boolean;
+  BootstrapReportId: String;
+  BootstrapLogPath: String;
+  BootstrapUploadStatus: String;
 
 (* ── Log Memo Helper ──────────────────────────────────────────────── *)
 
@@ -130,10 +134,9 @@ end;
 
 function GetDefaultFailureSummary(const FailureCode: String): String;
 begin
-  if FailureCode <> '' then
-    Result := '错误码 ' + FailureCode + '：安装过程中出现外部命令错误。请查看日志获取详细信息：' + #13#10 + GetBootstrapLogRoot
-  else
-    Result := 'OpenClaw 安装失败。请查看日志获取详细信息：' + #13#10 + GetBootstrapLogRoot;
+  Result :=
+    'OpenClaw 安装未能完成。' + #13#10 + #13#10 +
+    '请稍后重试；如果问题持续存在，请重新下载安装包后再试。';
 end;
 
 function ClampPercent(const Value: Integer): Integer;
@@ -253,6 +256,15 @@ begin
     Exit;
   end;
 
+  { ── Diagnostics protocol: @@OPENCLAW_DIAGNOSTICS|<reportId>|<logPath>|<status> ── }
+  if Pos('@@OPENCLAW_DIAGNOSTICS|', Line) = 1 then begin
+    Delete(Line, 1, Length('@@OPENCLAW_DIAGNOSTICS|'));
+    BootstrapReportId := PopField(Line);
+    BootstrapLogPath := PopField(Line);
+    BootstrapUploadStatus := Trim(Line);
+    Exit;
+  end;
+
   { ── Stage protocol: @@OPENCLAW_STAGE|<id>|<percent>|<message> ── }
   if Pos('@@OPENCLAW_STAGE|', Line) = 1 then begin
     Delete(Line, 1, Length('@@OPENCLAW_STAGE|'));
@@ -283,6 +295,9 @@ begin
   BootstrapFailureMessage := '';
   BootstrapFailureCode := '';
   BootstrapDidFail := False;
+  BootstrapReportId := '';
+  BootstrapLogPath := '';
+  BootstrapUploadStatus := '';
 
   if InstallLogMemo <> nil then begin
     try
@@ -306,6 +321,9 @@ begin
     ' -ManifestPath ' + AddQuotes(ExpandConstant('{app}\resources\manifests\dependencies.json')) +
     ' -OfficialScriptPath ' + AddQuotes(ExpandConstant('{app}\resources\upstream\openclaw-install.ps1')) +
     ' -LauncherPath ' + AddQuotes(ExpandConstant('{app}\bin\OpenClawLauncher.exe')) +
+    ' -InstallerVersion ' + AddQuotes('{#AppVersion}') +
+    ' -BuildVersion ' + AddQuotes('{#AppVersion}') +
+    ' -DiagnosticsUploadUri ' + AddQuotes('{#DiagnosticsUploadUrl}') +
     ' -ExistingInstallAction Auto' +
     ' -ShortcutName "OpenClaw"';
 
@@ -331,11 +349,10 @@ begin
     if LooksLikeUnreadableFailureText(BootstrapFailureMessage) then
       BootstrapFailureMessage := GetDefaultFailureSummary(BootstrapFailureCode);
 
-    if BootstrapFailureCode <> '' then
-      BootstrapFailureMessage :=
-        '错误码 ' + BootstrapFailureCode + '（' +
-        GetStageCaption(BootstrapFailureCode, '') + '）' + #13#10#13#10 +
-        BootstrapFailureMessage;
+    if BootstrapReportId <> '' then begin
+      BootstrapFailureMessage := BootstrapFailureMessage + #13#10#13#10 +
+        '参考编号: ' + BootstrapReportId;
+    end;
 
     SafeCloseBootstrapUi;
     RaiseException(BootstrapFailureMessage);

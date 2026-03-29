@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$RepositoryRoot,
+    [string]$DiagnosticsUploadUri,
     [switch]$SkipSync,
     [switch]$SkipSigning
 )
@@ -31,7 +32,25 @@ if (-not $iscc) {
 
 $installerScript = Join-Path $RepositoryRoot 'installer\inno\OpenClawSetup.iss'
 Write-Host "Compiling $installerScript"
-$process = Start-Process -FilePath $iscc -ArgumentList @($installerScript) -NoNewWindow -PassThru -Wait
+
+$previousDiagnosticsUploadUri = $env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI
+if ($PSBoundParameters.ContainsKey('DiagnosticsUploadUri')) {
+    $env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI = $DiagnosticsUploadUri
+    Write-Host "Using diagnostics upload URL: $DiagnosticsUploadUri"
+}
+
+try {
+    $process = Start-Process -FilePath $iscc -ArgumentList @($installerScript) -NoNewWindow -PassThru -Wait
+} finally {
+    if ($PSBoundParameters.ContainsKey('DiagnosticsUploadUri')) {
+        if ($null -eq $previousDiagnosticsUploadUri) {
+            Remove-Item Env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI -ErrorAction SilentlyContinue
+        } else {
+            $env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI = $previousDiagnosticsUploadUri
+        }
+    }
+}
+
 if ($process.ExitCode -ne 0) {
     throw "ISCC.exe failed with exit code $($process.ExitCode)."
 }

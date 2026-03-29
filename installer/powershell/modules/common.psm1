@@ -10,6 +10,7 @@ Import-Module (Join-Path $modulesRoot 'errors.psm1')  -Force -DisableNameCheckin
 Import-Module (Join-Path $modulesRoot 'logging.psm1') -Force -DisableNameChecking
 
 $script:Utf8Enc = Get-Utf8NoBomEncoding
+$script:LastExternalCommandInfo = $null
 
 function Test-ForcedMissingDependency {
     [CmdletBinding()]
@@ -585,6 +586,254 @@ function Test-TextLooksCorrupted {
     return ($Text.Contains([char]0xFFFD) -or $Text -match '�{2,}')
 }
 
+function Get-CommandVersionText {
+    [CmdletBinding()]
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @('--version')
+    )
+
+    if ([string]::IsNullOrWhiteSpace($FilePath) -or -not (Test-Path $FilePath)) {
+        return $null
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = [string]::Join(' ', $Arguments)
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    try {
+        $psi.StandardOutputEncoding = $script:Utf8Enc
+        $psi.StandardErrorEncoding = $script:Utf8Enc
+    } catch { }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+
+    try {
+        [void]$process.Start()
+        $stdOut = $process.StandardOutput.ReadToEnd()
+        $stdErr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+    } catch {
+        return $null
+    }
+
+    if ($process.ExitCode -ne 0) {
+        return $null
+    }
+
+    foreach ($candidate in @($stdOut, $stdErr)) {
+        foreach ($line in ($candidate -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                return $trimmed
+            }
+        }
+    }
+
+    return $null
+}
+
+function Protect-DiagnosticText {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return $null
+    }
+
+    $value = [string]$Text
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+
+    if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+        $value = $value.Replace($userProfile, '%USERPROFILE%')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
+        $value = [regex]::Replace(
+            $value,
+            [regex]::Escape($env:COMPUTERNAME),
+            '<HOST>',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+
+    $value = [regex]::Replace(
+        $value,
+        '(?i)\b(token|key|secret|password|auth|credential)\b\s*[:=]\s*([^\s,;]+)',
+        '$1=__REDACTED__'
+    )
+
+    return $value
+}
+
+function Protect-DiagnosticObject {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$InputObject
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [string]) {
+        return (Protect-DiagnosticText -Text $InputObject)
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $dictionary = [ordered]@{}
+        foreach ($key in $InputObject.Keys) {
+            $name = [string]$key
+            if ($name -match '(?i)token|key|secret|password|auth|credential') {
+                $dictionary[$name] = '__REDACTED__'
+            } else {
+                $dictionary[$name] = Protect-DiagnosticObject -InputObject $InputObject[$key]
+            }
+        }
+
+        return $dictionary
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
+        $items = @()
+        foreach ($item in $InputObject) {
+            $items += ,(Protect-DiagnosticObject -InputObject $item)
+        }
+
+        return $items
+    }
+
+    if ($InputObject.PSObject -and $InputObject.PSObject.Properties.Count -gt 0) {
+        $objectCopy = [ordered]@{}
+        foreach ($property in $InputObject.PSObject.Properties) {
+            if ($property.Name -match '(?i)token|key|secret|password|auth|credential') {
+                $objectCopy[$property.Name] = '__REDACTED__'
+            } else {
+                $objectCopy[$property.Name] = Protect-DiagnosticObject -InputObject $property.Value
+            }
+        }
+
+        return $objectCopy
+    }
+
+    return $InputObject
+}
+
+function Get-LastExternalCommandInfo {
+    if (-not $script:LastExternalCommandInfo) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        filePath = $script:LastExternalCommandInfo.filePath
+        arguments = @($script:LastExternalCommandInfo.arguments)
+        exitCode = $script:LastExternalCommandInfo.exitCode
+    }
+}
+
+function New-DiagnosticsSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$InstallerVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorCode,
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorMessage,
+        [string]$LocalLogPath,
+        [string]$LocalStatePath
+    )
+
+    $session = logging\Get-InstallerSessionInfo
+    $lastCommandInfo = Get-LastExternalCommandInfo
+    $nodeVersion = $null
+    if ($State.dependencies -and $State.dependencies.node) {
+        $nodeVersion = $State.dependencies.node.version
+    }
+
+    $npmVersion = $null
+    if ($State.dependencies -and $State.dependencies.npm) {
+        $npmVersion = Get-CommandVersionText -FilePath $State.dependencies.npm.path
+    }
+
+    $gitVersion = $null
+    if ($State.dependencies -and $State.dependencies.git) {
+        $gitVersion = Get-CommandVersionText -FilePath $State.dependencies.git.path
+    }
+
+    $summary = [ordered]@{
+        schemaVersion = 1
+        source = 'windows-installer'
+        installerVersion = $InstallerVersion
+        buildVersion = $BuildVersion
+        timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+        osVersion = [Environment]::OSVersion.VersionString
+        architecture = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+        isAdmin = (
+            New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        locale = [System.Globalization.CultureInfo]::CurrentCulture.Name
+        currentStep = [ordered]@{
+            id = if ($session) { $session.currentStepId } else { $null }
+            number = if ($session) { $session.currentStepNumber } else { $null }
+            name = if ($session) { $session.currentStepName } else { $null }
+        }
+        failedStep = [ordered]@{
+            id = if ($session) { $session.currentStepId } else { $null }
+            code = $ErrorCode
+        }
+        errorCode = $ErrorCode
+        errorMessage = $ErrorMessage
+        lastCommand = if ($lastCommandInfo) { ((@($lastCommandInfo.filePath) + @($lastCommandInfo.arguments)) -join ' ').Trim() } else { $null }
+        exitCode = if ($lastCommandInfo) { $lastCommandInfo.exitCode } else { $null }
+        dependencies = [ordered]@{
+            node = [ordered]@{
+                detected = [bool]($State.dependencies -and $State.dependencies.node -and $State.dependencies.node.installed)
+                version = $nodeVersion
+            }
+            npm = [ordered]@{
+                detected = [bool]($State.dependencies -and $State.dependencies.npm -and $State.dependencies.npm.installed)
+                version = $npmVersion
+            }
+            git = [ordered]@{
+                detected = [bool]($State.dependencies -and $State.dependencies.git -and $State.dependencies.git.installed)
+                version = $gitVersion
+            }
+            webview2 = [ordered]@{
+                detected = [bool]($State.dependencies -and $State.dependencies.webview2 -and $State.dependencies.webview2.installed)
+            }
+            openclaw = [ordered]@{
+                detected = [bool]($State.dependencies -and $State.dependencies.openclaw -and $State.dependencies.openclaw.installed)
+            }
+        }
+        installationState = [ordered]@{
+            launcherExists = [bool]($State.installRoot -and (Test-Path (Join-Path $State.installRoot 'bin\OpenClawLauncher.exe')))
+            shortcutExists = [bool]($State.shortcuts -and @($State.shortcuts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
+            gatewayReachable = [bool]$State.launcherValidated
+            installRootExists = [bool]($State.installRoot -and (Test-Path $State.installRoot))
+        }
+        references = [ordered]@{
+            localLogPath = $LocalLogPath
+            localStatePath = $LocalStatePath
+        }
+    }
+
+    return (Protect-DiagnosticObject -InputObject $summary)
+}
+
 function Get-ExternalCommandFailureSummary {
     [CmdletBinding()]
     param(
@@ -682,6 +931,11 @@ function Invoke-ExternalCommand {
 
     $displayCmd = Mask-SensitiveText -Text ("Running: {0} {1}" -f $FilePath, ($Arguments -join ' ')) -SensitiveValues $SensitiveValues
     Write-Log -Message $displayCmd -Data @{ command = $FilePath; arguments = $Arguments; workingDirectory = $WorkingDirectory }
+    $script:LastExternalCommandInfo = [ordered]@{
+        filePath = $FilePath
+        arguments = @($Arguments)
+        exitCode = $null
+    }
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
@@ -689,6 +943,7 @@ function Invoke-ExternalCommand {
     $stdOut = $process.StandardOutput.ReadToEnd()
     $stdErr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
+    $script:LastExternalCommandInfo.exitCode = $process.ExitCode
 
     if ($stdOut) {
         $displayOut = if ($RedactStdOut) { '__REDACTED__' } else { Mask-SensitiveText -Text $stdOut.TrimEnd() -SensitiveValues $SensitiveValues }
@@ -769,5 +1024,6 @@ Export-ModuleMember -Function `
     Get-EdgePath, Get-WebView2RuntimeVersion, Test-WebView2RuntimeInstalled, `
     Get-DesktopShortcutPath, Get-StartMenuShortcutPath, `
     New-RandomBase64Token, `
+    Protect-DiagnosticText, Protect-DiagnosticObject, Get-LastExternalCommandInfo, New-DiagnosticsSummary, `
     Invoke-Retry, Test-HttpEndpoint, Wait-Until, Test-TextLooksCorrupted, Get-ExternalCommandFailureSummary, `
     Invoke-ExternalCommand, Invoke-OpenClaw
