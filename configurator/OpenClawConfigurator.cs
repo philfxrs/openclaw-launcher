@@ -573,6 +573,7 @@ internal sealed class ConfigStore
 
         // Keep compatibility with recent OpenClaw schema versions.
         MigrateLegacyProviderToModels(flatToSave);
+        EnsureProviderModelsArrays(flatToSave);
         RemoveSchemaInvalidKeys(flatToSave);
 
         Dictionary<string, object> nested = UnflattenDictionary(flatToSave);
@@ -620,13 +621,45 @@ internal sealed class ConfigStore
             flat["models.providers." + providerId + ".apiKey"] = providerApiKey.Trim();
         }
 
-        // DeepSeek / OpenAI-compatible providers work best with openai-responses API shape.
+        // DeepSeek / OpenAI-compatible providers use the chat completions API.
         flat["models.providers." + providerId + ".auth"] = "api-key";
-        flat["models.providers." + providerId + ".api"] = "openai-responses";
+        flat["models.providers." + providerId + ".api"] = "openai-completions";
+
+        flat["models.providers." + providerId + ".models"] = new System.Collections.ArrayList();
 
         if (!string.IsNullOrWhiteSpace(providerModel))
         {
             flat["agents.defaults.model"] = providerId + "/" + providerModel.Trim();
+        }
+    }
+
+    private static void EnsureProviderModelsArrays(Dictionary<string, object> flat)
+    {
+        // Collect provider IDs from keys like "models.providers.<id>.apiKey"
+        const string providerPrefix = "models.providers.";
+        HashSet<string> providerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string key in flat.Keys)
+        {
+            if (key.StartsWith(providerPrefix, StringComparison.OrdinalIgnoreCase) && key.Length > providerPrefix.Length)
+            {
+                string remainder = key.Substring(providerPrefix.Length);
+                int dot = remainder.IndexOf('.');
+                if (dot > 0)
+                {
+                    providerIds.Add(remainder.Substring(0, dot));
+                }
+            }
+        }
+
+        foreach (string id in providerIds)
+        {
+            string modelsKey = "models.providers." + id + ".models";
+            object existing;
+            if (!flat.TryGetValue(modelsKey, out existing) || !(existing is System.Collections.ArrayList))
+            {
+                flat[modelsKey] = new System.Collections.ArrayList();
+            }
         }
     }
 
