@@ -66,7 +66,30 @@ function Start-UserSessionGateway {
     )
 
     Write-Log -Message 'Gateway daemon is unavailable; starting OpenClaw gateway in the current user session.' -Level 'WARN'
-    Start-Process -FilePath $OpenClawCommandPath -ArgumentList 'gateway' -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath $OpenClawCommandPath -ArgumentList @('gateway', 'start') -WindowStyle Hidden | Out-Null
+}
+
+function Start-GatewayBestEffort {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OpenClawCommandPath
+    )
+
+    try {
+        Invoke-OpenClaw -Arguments @('gateway', 'start') -AllowNonZeroExit | Out-Null
+    } catch {
+        Write-Log -Message ("Gateway start command did not complete cleanly: {0}" -f $_.Exception.Message) -Level 'WARN'
+    }
+
+    if (-not (Test-GatewayReachable)) {
+        Start-UserSessionGateway -OpenClawCommandPath $OpenClawCommandPath
+    }
+}
+
+function Set-LocalGatewayConfiguration {
+    Write-Log -Message 'Ensuring local gateway configuration is explicit.'
+    Invoke-OpenClaw -Arguments @('config', 'set', 'gateway.mode', 'local') | Out-Null
+    Invoke-OpenClaw -Arguments @('config', 'set', 'gateway.bind', 'loopback') | Out-Null
 }
 
 $version = (Invoke-OpenClaw -Arguments @('--version')).StdOut.Trim()
@@ -84,14 +107,13 @@ if (-not $SkipOnboard) {
 
     if ($existingToken) {
         Write-Log -Message 'Existing OpenClaw gateway token detected; reusing configuration.'
+        Set-LocalGatewayConfiguration
         Invoke-OpenClaw -Arguments @('doctor', '--non-interactive') -AllowNonZeroExit | Out-Null
         try {
             Invoke-OpenClaw -Arguments @('gateway', 'install', '--force') | Out-Null
         } catch {
             Write-Log -Message ("Gateway daemon install did not complete cleanly: {0}" -f $_.Exception.Message) -Level 'WARN'
         }
-
-        Invoke-OpenClaw -Arguments @('gateway', 'start') -AllowNonZeroExit | Out-Null
         $gatewayToken = $existingToken
     } else {
         Write-Log -Message 'Running non-interactive onboarding for a local gateway'
@@ -110,13 +132,13 @@ if (-not $SkipOnboard) {
         } catch {
             Write-Log -Message ("Non-interactive onboarding did not complete cleanly: {0}" -f $_.Exception.Message) -Level 'WARN'
         }
+
+        Set-LocalGatewayConfiguration
     }
 
-    if (-not (Test-GatewayReachable)) {
-        Start-UserSessionGateway -OpenClawCommandPath $openclawPath
-    }
+    Start-GatewayBestEffort -OpenClawCommandPath $openclawPath
 
-    Wait-Until -Description 'OpenClaw gateway HTTP endpoint' -TimeoutSeconds 90 -PollSeconds 3 -Condition {
+    Wait-Until -Description 'OpenClaw gateway HTTP endpoint' -TimeoutSeconds 180 -PollSeconds 3 -Condition {
         return (Test-GatewayReachable)
     }
 

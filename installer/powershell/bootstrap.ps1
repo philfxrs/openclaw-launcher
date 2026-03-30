@@ -8,7 +8,8 @@ param(
     [string]$Channel = 'latest',
     [string]$InstallerVersion = '0.1.10',
     [string]$BuildVersion = '0.1.10',
-    [string]$DiagnosticsUploadUri,
+    [AllowEmptyString()]
+    [string]$DiagnosticsUploadUri = '',
     [ValidateSet('Auto', 'Repair', 'Overwrite', 'SkipIfPresent')]
     [string]$ExistingInstallAction = 'Auto',
     [switch]$SkipLaunchAfterInstall
@@ -91,6 +92,25 @@ function Ensure-BootstrapStateShape {
     return $State
 }
 
+function Reset-InstallStateForNewRun {
+    param(
+        [object]$ExistingState
+    )
+
+    $newState = New-InstallState
+
+    if ($null -eq $ExistingState) {
+        return (Ensure-BootstrapStateShape -State $newState)
+    }
+
+    $newState.nodeInstalledByBootstrap = [bool]$ExistingState.nodeInstalledByBootstrap
+    $newState.nodeProductCode = $ExistingState.nodeProductCode
+    $newState.gitInstalledByBootstrap = [bool]$ExistingState.gitInstalledByBootstrap
+    $newState.gitUninstallerPath = $ExistingState.gitUninstallerPath
+
+    return (Ensure-BootstrapStateShape -State $newState)
+}
+
 $stateRoot = Join-Path $env:ProgramData 'OpenClawInstaller'
 $logRoot = Join-Path $stateRoot 'Logs'
 $statePath = $null
@@ -113,18 +133,19 @@ if (-not $LauncherPath) {
 if (-not $DiagnosticsUploadUri) {
     $DiagnosticsUploadUri = $env:OPENCLAW_DIAGNOSTICS_UPLOAD_URI
 }
+if ([string]::IsNullOrWhiteSpace($DiagnosticsUploadUri)) {
+    $DiagnosticsUploadUri = 'https://mingos.cc/installer-diagnostics'
+}
 
 $statePath = Join-Path $stateRoot 'install-state.json'
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
 
 $existingState = Read-InstallState -Path $statePath
 if ($existingState -and $existingState.schemaVersion -eq 2) {
-    $state = $existingState
+    $state = Reset-InstallStateForNewRun -ExistingState $existingState
 } else {
-    $state = New-InstallState
+    $state = Reset-InstallStateForNewRun -ExistingState $null
 }
-
-$state = Ensure-BootstrapStateShape -State $state
 
 $session = Initialize-InstallerSession -ProductName 'OpenClawInstaller' -LogRoot $logRoot
 $state.installRoot = $InstallRoot
@@ -136,6 +157,7 @@ Save-InstallState -State $state -Path $statePath
 
 $exitCode = 0
 $script:BootstrapAdditionalPathEntries = @()
+$script:ValidationRuntimeRoot = $null
 
 function Save-State {
     if ($null -eq $state) {
@@ -147,6 +169,72 @@ function Save-State {
     if ($statePath) {
         Save-InstallState -State $state -Path $statePath
     }
+}
+
+function Initialize-ValidationRuntimeSupport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot
+    )
+
+    $runtimePowerShellRoot = Join-Path $DestinationRoot 'powershell'
+    $runtimeValidationRoot = Join-Path $DestinationRoot 'validation'
+
+    New-Item -ItemType Directory -Force -Path $runtimePowerShellRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $runtimeValidationRoot | Out-Null
+
+    Copy-Item -Path (Join-Path $script:InstallerPSRoot '*') -Destination $runtimePowerShellRoot -Recurse -Force
+    Copy-Item -Path (Join-Path $script:InstallerValidationRoot '*') -Destination $runtimeValidationRoot -Recurse -Force
+
+    return [ordered]@{
+        root       = $DestinationRoot
+        validation = $runtimeValidationRoot
+    }
+}
+
+function Resolve-ValidationScriptPath {
+    $candidates = @()
+
+    if ($script:ValidationRuntimeRoot) {
+        $candidates += (Join-Path $script:ValidationRuntimeRoot 'validate-install.ps1')
+    }
+
+    if ($script:InstallerValidationRoot) {
+        $candidates += (Join-Path $script:InstallerValidationRoot 'validate-install.ps1')
+    }
+
+    if ($InstallRoot) {
+        $candidates += (Join-Path $InstallRoot 'validation\validate-install.ps1')
+    }
+
+    foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw (New-InstallerException -Code 'E2006' -Message ('Validation script missing. Checked: {0}' -f (($candidates | Select-Object -Unique) -join '; ')))
+}
+
+function Invoke-InstallerValidation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Prerequisites', 'Installed', 'Launch')]
+        [string]$Scenario
+    )
+
+    $validationScriptPath = Resolve-ValidationScriptPath
+    Write-Log -Message ('Using validation script: {0}' -f $validationScriptPath)
+
+    return & $validationScriptPath -ManifestPath $ManifestPath -LauncherPath $LauncherPath -ShortcutName $ShortcutName -Scenario $Scenario
+}
+
+try {
+    $runtimeSupport = Initialize-ValidationRuntimeSupport -DestinationRoot (Join-Path $stateRoot 'runtime-support')
+    $script:ValidationRuntimeRoot = $runtimeSupport.validation
+    Write-Log -Message ('Staged validation runtime support at: {0}' -f $runtimeSupport.root) -Level 'SUCCESS'
+} catch {
+    Write-Log -Message ('Failed to stage validation runtime support: {0}. Falling back to installed support files.' -f $_.Exception.Message) -Level 'WARN'
 }
 
 function Publish-InstallerFailure {
@@ -168,6 +256,69 @@ function Publish-InstallerDiagnostics {
     )
 
     Write-Host ('@@OPENCLAW_DIAGNOSTICS|{0}|{1}|{2}' -f $ReportId, $LogPath, $UploadStatus)
+}
+
+function Invoke-DiagnosticsUploadInline {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SummaryPath,
+        [Parameter(Mandatory = $true)]
+        [string]$UploadUri
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UploadUri) -or -not (Test-Path $SummaryPath)) {
+        return $null
+    }
+
+    Add-Type -AssemblyName System.Net.Http
+
+    $client = New-Object System.Net.Http.HttpClient
+    $client.Timeout = [TimeSpan]::FromSeconds(3)
+
+    try {
+        $content = New-Object System.Net.Http.MultipartFormDataContent
+
+        $summaryBytes = [System.IO.File]::ReadAllBytes($SummaryPath)
+        $summaryPart = New-Object System.Net.Http.ByteArrayContent(,$summaryBytes)
+        $summaryPart.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/json')
+
+        $content.Add($summaryPart, 'summary', [System.IO.Path]::GetFileName($SummaryPath))
+        $content.Add((New-Object System.Net.Http.StringContent('windows-installer')), 'source')
+
+        $response = $client.PostAsync($UploadUri, $content).GetAwaiter().GetResult()
+        $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+
+        if (-not $response.IsSuccessStatusCode) {
+            return [pscustomobject]@{
+                success = $false
+                reportId = $null
+                error = ('HTTP {0}: {1}' -f [int]$response.StatusCode, $body)
+            }
+        }
+
+        $result = $body | ConvertFrom-Json
+        $uploadResult = [pscustomobject]@{
+            success = [bool]$result.success
+            reportId = [string]$result.reportId
+            error = $null
+        }
+
+        try {
+            $resultPath = $SummaryPath + '.upload-result.json'
+            Save-JsonFile -InputObject ([ordered]@{
+                reportId = $uploadResult.reportId
+                success = $uploadResult.success
+                uploadedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            }) -Path $resultPath
+        } catch { }
+
+        return $uploadResult
+    } finally {
+        if ($null -ne $client) {
+            $client.Dispose()
+        }
+    }
 }
 
 function Start-DiagnosticsUpload {
@@ -320,14 +471,31 @@ trap {
 
         if (-not [string]::IsNullOrWhiteSpace($diagnosticsUploadUriValue)) {
             try {
-                if (Start-DiagnosticsUpload -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue) {
-                    $uploadStatus = 'scheduled'
-                    Write-Log -Message 'Diagnostics summary upload scheduled in background.' -Level 'INFO'
+                $uploadResult = Invoke-DiagnosticsUploadInline -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue
+                if ($uploadResult -and $uploadResult.success) {
+                    $reportId = $uploadResult.reportId
+                    $uploadStatus = 'completed'
+                    Write-Log -Message ('Diagnostics uploaded. reportId={0}' -f $reportId) -Level 'SUCCESS'
+                } elseif ($uploadResult) {
+                    Write-Log -Message ('Inline diagnostics upload failed: {0}. Scheduling background retry.' -f $uploadResult.error) -Level 'WARN'
+                    if (Start-DiagnosticsUpload -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue) {
+                        $uploadStatus = 'scheduled'
+                    }
                 } else {
-                    Write-Log -Message 'Diagnostics summary upload skipped because scheduling prerequisites were not met.' -Level 'WARN'
+                    Write-Log -Message 'Inline diagnostics upload returned no result. Scheduling background retry.' -Level 'WARN'
+                    if (Start-DiagnosticsUpload -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue) {
+                        $uploadStatus = 'scheduled'
+                    }
                 }
             } catch {
-                Write-Log -Message ('Diagnostics summary upload scheduling failed: {0}' -f $_.Exception.Message) -Level 'WARN'
+                Write-Log -Message ('Inline diagnostics upload error: {0}. Scheduling background retry.' -f $_.Exception.Message) -Level 'WARN'
+                try {
+                    if (Start-DiagnosticsUpload -SummaryPath $summaryPath -UploadUri $diagnosticsUploadUriValue) {
+                        $uploadStatus = 'scheduled'
+                    }
+                } catch {
+                    Write-Log -Message ('Background diagnostics upload scheduling also failed: {0}' -f $_.Exception.Message) -Level 'WARN'
+                }
             }
         } else {
             Write-Log -Message 'Diagnostics upload URI is not configured; summary upload skipped.' -Level 'WARN'
@@ -456,7 +624,7 @@ $depInstallAction = {
 $null = Invoke-InstallerPhase -StepId 'dep-install' -StepNumber 9 -StepName '下载并安装缺失依赖' -Percent 35 -FailureCode 'E2002' -Action $depInstallAction
 
 $depVerifyAction = {
-    $validation = & (Join-Path $InstallRoot 'validation\validate-install.ps1') -ManifestPath $ManifestPath -LauncherPath $LauncherPath -ShortcutName $ShortcutName -Scenario Prerequisites
+    $validation = Invoke-InstallerValidation -Scenario Prerequisites
     $state.dependencies.node = $validation.node
     $state.dependencies.npm = $validation.npm
     $state.dependencies.git = $validation.git
@@ -472,7 +640,7 @@ if ($preflight.openclaw.installed) {
         '-NoLogo',
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
-        '-File', (Join-Path $InstallRoot 'validation\validate-install.ps1'),
+        '-File', (Resolve-ValidationScriptPath),
         '-ManifestPath', $ManifestPath,
         '-LauncherPath', $LauncherPath,
         '-ShortcutName', $ShortcutName,
@@ -507,7 +675,7 @@ else
 }
 
 $officialVerifyAction = {
-    $validation = & (Join-Path $InstallRoot 'validation\validate-install.ps1') -ManifestPath $ManifestPath -LauncherPath $LauncherPath -ShortcutName $ShortcutName -Scenario Installed
+    $validation = Invoke-InstallerValidation -Scenario Installed
     $state.dependencies.openclaw = $validation.openclaw
     Save-State
 }
@@ -534,7 +702,7 @@ if ($SkipLaunchAfterInstall) {
     $null = Invoke-InstallerPhase -StepId 'launch' -StepNumber 14 -StepName '自动启动 OpenClaw' -Percent 84 -FailureCode 'E3003' -Action $launchAction
 
     $launchVerifyAction = {
-        $null = & (Join-Path $InstallRoot 'validation\validate-install.ps1') -ManifestPath $ManifestPath -LauncherPath $LauncherPath -ShortcutName $ShortcutName -Scenario Launch
+        $null = Invoke-InstallerValidation -Scenario Launch
         $state.launcherValidated = $true
         Save-State
     }

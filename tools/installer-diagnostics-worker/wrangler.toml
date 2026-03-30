@@ -1,0 +1,13 @@
+name = "openclaw-installer-diagnostics"
+main = "src/index.ts"
+compatibility_date = "2026-03-25"
+
+[vars]
+APP_VERSION = "0.1.0"
+ALLOWED_SOURCE = "windows-installer"
+
+# Configure secrets with Wrangler instead of committing them here:
+# wrangler secret put GITHUB_TOKEN
+# wrangler secret put GITHUB_OWNER
+# wrangler secret put GITHUB_REPO
+# wrangler secret put SHARED_SECRET

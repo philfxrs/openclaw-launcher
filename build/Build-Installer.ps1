@@ -17,6 +17,28 @@ if (-not $SkipSync) {
     & (Join-Path $PSScriptRoot 'Sync-UpstreamAssets.ps1') -RepositoryRoot $RepositoryRoot
 }
 
+$configuratorSource = Join-Path $RepositoryRoot 'configurator\OpenClawConfigurator.cs'
+$configuratorOutputDir = Join-Path $RepositoryRoot 'artifacts\configurator'
+$launcherOutputDir = Join-Path $RepositoryRoot 'artifacts\launcher'
+
+$latestConfiguratorArtifact = Get-ChildItem -Path $configuratorOutputDir -Filter 'OpenClawConfigurator*.exe' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1
+
+if (-not $latestConfiguratorArtifact -or $latestConfiguratorArtifact.LastWriteTimeUtc -lt (Get-Item $configuratorSource).LastWriteTimeUtc) {
+    & (Join-Path $PSScriptRoot 'Build-Configurator.ps1') -RepositoryRoot $RepositoryRoot -SkipSigning:$SkipSigning
+    $latestConfiguratorArtifact = Get-ChildItem -Path $configuratorOutputDir -Filter 'OpenClawConfigurator*.exe' |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+}
+
+if (-not $latestConfiguratorArtifact) {
+    throw 'OpenClawConfigurator.exe was not produced. Build-Configurator.ps1 did not create any configurator artifact.'
+}
+
+New-Item -ItemType Directory -Force -Path $launcherOutputDir | Out-Null
+Copy-Item -Path $latestConfiguratorArtifact.FullName -Destination (Join-Path $launcherOutputDir 'OpenClawConfigurator.exe') -Force
+
 & (Join-Path $PSScriptRoot 'Build-Launcher.ps1') -RepositoryRoot $RepositoryRoot -SkipSigning
 
 $isccCandidates = @(

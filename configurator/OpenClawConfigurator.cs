@@ -325,12 +325,21 @@ internal static class ConfigSchema
             Section = "Provider / 接入配置",
             Key = "provider.type",
             DisplayName = "Provider 类型",
-            Description = "AI 模型提供商类型。不同类型对应不同的 API 协议和鉴权方式。",
-            RecommendedValue = "openai",
+            Description = "AI 模型提供商。选择后将自动填充默认模型和 API 地址。",
+            RecommendedValue = "OpenAI",
             Risk = RiskLevel.High,
             FieldType = ConfigFieldType.Choice,
-            Choices = new[] { "openai", "anthropic", "azure", "ollama", "custom" },
-            DefaultValue = "openai"
+            Choices = new[] {
+                "Anthropic", "Chutes", "Cloudflare AI Gateway", "Copilot",
+                "Custom Provider", "DeepSeek", "fal", "Google", "Hugging Face",
+                "Kilo Gateway", "Kimi Coding", "LiteLLM", "Microsoft Foundry",
+                "MiniMax", "Mistral AI", "Moonshot",
+                "Ollama", "OpenAI", "OpenCode", "OpenRouter",
+                "Qianfan", "Qwen (Alibaba Cloud)", "SGLang", "Synthetic",
+                "Together AI", "Venice AI", "Vercel AI Gateway", "vLLM",
+                "Volcano Engine", "xAI (Grok)", "Xiaomi", "Z.AI"
+            },
+            DefaultValue = "OpenAI"
         });
         fields.Add(new ConfigFieldDescriptor
         {
@@ -366,8 +375,8 @@ internal static class ConfigSchema
             Section = "Provider / 接入配置",
             Key = "provider.model",
             DisplayName = "模型名称",
-            Description = "使用的 AI 模型标识。不同 provider 支持不同的模型名称。",
-            RecommendedValue = "gpt-4",
+            Description = "使用的 AI 模型标识。切换 Provider 后将自动填充推荐模型。",
+            RecommendedValue = "gpt-5.4",
             Risk = RiskLevel.Medium,
             FieldType = ConfigFieldType.Text,
             DefaultValue = ""
@@ -906,6 +915,8 @@ internal sealed class ConfigFieldControl : Panel
 
     public string Key { get { return _descriptor.Key; } }
 
+    public Control GetInputControl() { return _inputControl; }
+
     public object GetCurrentValue()
     {
         if (_descriptor.FieldType == ConfigFieldType.Boolean)
@@ -1076,6 +1087,43 @@ internal sealed class ConfigFieldControl : Panel
 
 internal sealed class ConfiguratorForm : Form
 {
+    // Provider ID → [displayName, defaultModel, defaultBaseUrl]
+    private static readonly Dictionary<string, string[]> ProviderDefaults = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Anthropic", new[] { "Anthropic", "", "" } },
+        { "Chutes", new[] { "Chutes", "zai-org/GLM-4.7-TEE", "" } },
+        { "Cloudflare AI Gateway", new[] { "Cloudflare AI Gateway", "claude-sonnet-4-5", "" } },
+        { "Copilot", new[] { "Copilot", "", "" } },
+        { "DeepSeek", new[] { "DeepSeek", "deepseek-chat", "https://api.deepseek.com" } },
+        { "fal", new[] { "fal", "fal-ai/flux/dev", "" } },
+        { "Google", new[] { "Google", "", "" } },
+        { "Hugging Face", new[] { "Hugging Face", "deepseek-ai/DeepSeek-R1", "" } },
+        { "Kilo Gateway", new[] { "Kilo Gateway", "kilo/auto", "" } },
+        { "Kimi Coding", new[] { "Moonshot AI (Kimi K2.5)", "kimi-code", "" } },
+        { "LiteLLM", new[] { "LiteLLM", "claude-opus-4-6", "" } },
+        { "Microsoft Foundry", new[] { "Microsoft Foundry", "gpt-5", "" } },
+        { "MiniMax", new[] { "MiniMax", "MiniMax-M2.7", "" } },
+        { "Mistral AI", new[] { "Mistral AI", "mistral-large-latest", "" } },
+        { "Qwen (Alibaba Cloud)", new[] { "Qwen (Alibaba Cloud Model Studio)", "qwen3.5-plus", "" } },
+        { "Moonshot", new[] { "Moonshot AI", "kimi-k2.5", "" } },
+        { "Ollama", new[] { "Ollama", "", "http://127.0.0.1:11434" } },
+        { "OpenAI", new[] { "OpenAI", "gpt-5.4", "https://api.openai.com/v1" } },
+        { "OpenCode", new[] { "OpenCode", "claude-opus-4-6", "" } },
+        { "OpenRouter", new[] { "OpenRouter", "auto", "" } },
+        { "Qianfan", new[] { "Qianfan", "deepseek-v3.2", "" } },
+        { "SGLang", new[] { "SGLang", "", "" } },
+        { "Synthetic", new[] { "Synthetic", "hf:MiniMaxAI/MiniMax-M2.5", "https://api.synthetic.new/anthropic" } },
+        { "Together AI", new[] { "Together AI", "moonshotai/Kimi-K2.5", "" } },
+        { "Venice AI", new[] { "Venice AI", "kimi-k2-5", "" } },
+        { "Vercel AI Gateway", new[] { "Vercel AI Gateway", "anthropic/claude-opus-4.6", "" } },
+        { "vLLM", new[] { "vLLM", "", "" } },
+        { "Volcano Engine", new[] { "Volcano Engine", "", "" } },
+        { "xAI (Grok)", new[] { "xAI (Grok)", "grok-4", "" } },
+        { "Xiaomi", new[] { "Xiaomi", "mimo-v2-flash", "" } },
+        { "Z.AI", new[] { "Z.AI", "glm-5", "" } },
+        { "Custom Provider", new[] { "Custom Provider", "", "" } },
+    };
+
     private readonly ConfigStore _store;
     private readonly List<ConfigFieldDescriptor> _allFields;
     private readonly Dictionary<string, ConfigFieldControl> _fieldControls;
@@ -1152,6 +1200,7 @@ internal sealed class ConfiguratorForm : Form
         LoadAndBuildUI();
 
         FormClosing += HandleFormClosing;
+        Shown += delegate { BeginBackgroundProviderDiscovery(); };
     }
 
     private void LoadAndBuildUI()
@@ -1217,7 +1266,15 @@ internal sealed class ConfiguratorForm : Form
                 ConfigFieldDescriptor field = fields[i];
                 string value = _store.GetValue(field.Key);
                 ConfigFieldControl control = new ConfigFieldControl(field, value);
-                control.ValueChanged += delegate { MarkDirty(); };
+                string fieldKey = field.Key;
+                control.ValueChanged += delegate
+                {
+                    if (string.Equals(fieldKey, "provider.type", StringComparison.OrdinalIgnoreCase))
+                    {
+                        HandleProviderTypeChanged();
+                    }
+                    MarkDirty();
+                };
                 tab.Controls.Add(control);
                 _fieldControls[field.Key] = control;
             }
@@ -1971,5 +2028,143 @@ internal sealed class ConfiguratorForm : Form
                 SaveConfig();
             }
         }
+    }
+
+    // ---- Provider auto-fill ----
+
+    private void HandleProviderTypeChanged()
+    {
+        if (_suppressSync) return;
+
+        ConfigFieldControl typeCtrl;
+        if (!_fieldControls.TryGetValue("provider.type", out typeCtrl)) return;
+
+        object val = typeCtrl.GetCurrentValue();
+        string providerType = val != null ? val.ToString() : "";
+
+        string[] defaults;
+        if (!ProviderDefaults.TryGetValue(providerType, out defaults)) return;
+
+        string defaultModel = defaults[1];
+        string defaultBase = defaults[2];
+
+        ConfigFieldControl modelCtrl;
+        if (_fieldControls.TryGetValue("provider.model", out modelCtrl))
+        {
+            object currentModel = modelCtrl.GetCurrentValue();
+            if (currentModel == null || string.IsNullOrWhiteSpace(currentModel.ToString()))
+            {
+                modelCtrl.SetCurrentValue(defaultModel);
+            }
+        }
+
+        ConfigFieldControl baseCtrl;
+        if (_fieldControls.TryGetValue("provider.api.base", out baseCtrl))
+        {
+            object currentBase = baseCtrl.GetCurrentValue();
+            if (currentBase == null || string.IsNullOrWhiteSpace(currentBase.ToString()))
+            {
+                if (!string.IsNullOrEmpty(defaultBase))
+                {
+                    baseCtrl.SetCurrentValue(defaultBase);
+                }
+            }
+        }
+
+        SetStatus("已切换到 " + providerType + (string.IsNullOrEmpty(defaultModel) ? "" : "，推荐模型: " + defaultModel));
+    }
+
+    // ---- Background provider discovery from dist ----
+
+    private void BeginBackgroundProviderDiscovery()
+    {
+        Task.Run(delegate
+        {
+            try
+            {
+                string openClawCmd = ResolveOpenClawCommand();
+                if (string.IsNullOrWhiteSpace(openClawCmd)) return;
+
+                string cmdDir = Path.GetDirectoryName(openClawCmd);
+                if (string.IsNullOrWhiteSpace(cmdDir)) return;
+
+                string extensionsDir = Path.Combine(cmdDir, "node_modules", "openclaw", "dist", "extensions");
+                if (!Directory.Exists(extensionsDir)) return;
+
+                List<string> discovered = new List<string>();
+                foreach (string dir in Directory.GetDirectories(extensionsDir))
+                {
+                    string pluginFile = Path.Combine(dir, "openclaw.plugin.json");
+                    if (!File.Exists(pluginFile)) continue;
+
+                    try
+                    {
+                        string json = File.ReadAllText(pluginFile, Encoding.UTF8);
+                        JavaScriptSerializer ser = new JavaScriptSerializer();
+                        Dictionary<string, object> plugin = ser.Deserialize<Dictionary<string, object>>(json);
+
+                        object authObj;
+                        if (!plugin.TryGetValue("providerAuthChoices", out authObj)) continue;
+
+                        object[] authArray = authObj as object[];
+                        if (authArray == null) continue;
+
+                        foreach (object item in authArray)
+                        {
+                            Dictionary<string, object> choice = item as Dictionary<string, object>;
+                            if (choice == null) continue;
+
+                            object groupLabel;
+                            if (choice.TryGetValue("groupLabel", out groupLabel) && groupLabel != null)
+                            {
+                                string label = groupLabel.ToString().Trim();
+                                if (!string.IsNullOrEmpty(label) && !discovered.Contains(label))
+                                {
+                                    discovered.Add(label);
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (discovered.Count == 0) return;
+
+                // Merge with existing — add any new providers not already in ProviderDefaults
+                List<string> merged = new List<string>(ProviderDefaults.Keys);
+                foreach (string name in discovered)
+                {
+                    if (!ProviderDefaults.ContainsKey(name) && !merged.Contains(name))
+                    {
+                        merged.Add(name);
+                        ProviderDefaults[name] = new[] { name, "", "" };
+                    }
+                }
+
+                BeginInvoke(new Action(delegate
+                {
+                    // Update the provider.type combo box with discovered providers
+                    ConfigFieldControl typeCtrl;
+                    if (_fieldControls.TryGetValue("provider.type", out typeCtrl))
+                    {
+                        ComboBox combo = typeCtrl.GetInputControl() as ComboBox;
+                        if (combo != null)
+                        {
+                            string current = combo.Text;
+                            combo.Items.Clear();
+                            combo.Items.AddRange(merged.ToArray());
+                            combo.Text = current;
+                        }
+                    }
+
+                    SetStatus("已从本地 OpenClaw 发现 " + discovered.Count + " 个 Provider");
+                }));
+            }
+            catch
+            {
+            }
+        });
     }
 }

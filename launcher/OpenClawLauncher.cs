@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -13,8 +14,8 @@ using System.Web.Script.Serialization;
 
 internal static class OpenClawLauncher
 {
-    private const string BaseDashboardUrl = "http://127.0.0.1:18789/";
-    private const string GatewayWebSocketUrl = "ws://127.0.0.1:18789";
+    private const string DefaultGatewayHost = "127.0.0.1";
+    private const int DefaultGatewayPort = 18789;
     private const string ControlSettingsStorageKey = "openclaw.control.settings.v1";
     private const string DeviceIdentityStorageKey = "openclaw-device-identity-v1";
     private const string DeviceTokenStorageKey = "openclaw.device.auth.v1";
@@ -120,13 +121,61 @@ internal static class OpenClawLauncher
             throw new InvalidOperationException("OpenClaw CLI was not found. Reinstall OpenClaw from the Windows installer.");
         }
 
+        GatewayRuntimeConfig gatewayConfig = LoadGatewayRuntimeConfig(logger);
         string gatewayToken = ReadGatewayToken(openClawCommand, logger);
-        EnsureGatewayStarted(openClawCommand, logger, timeoutSeconds);
+        EnsureGatewayStarted(openClawCommand, gatewayConfig, logger, timeoutSeconds);
 
-        string url = ResolveDashboardUrl(openClawCommand, gatewayToken, logger);
+        string url = ResolveDashboardUrl(openClawCommand, gatewayConfig, gatewayToken, logger);
         logger.Info("Resolved dashboard URL for the desktop shell.");
 
-        return new LaunchContext(openClawCommand, gatewayToken, GatewayWebSocketUrl, url);
+        return new LaunchContext(openClawCommand, gatewayToken, gatewayConfig.WebSocketUrl, url);
+    }
+
+    // The launcher follows the same ~/.openclaw/openclaw.json contract as the configurator.
+    private static GatewayRuntimeConfig LoadGatewayRuntimeConfig(FileLogger logger)
+    {
+        GatewayRuntimeConfig config = new GatewayRuntimeConfig(DefaultGatewayHost, DefaultGatewayPort);
+        string configPath = GetOpenClawConfigPath();
+
+        if (!File.Exists(configPath))
+        {
+            logger.Info("Gateway config file not found. Falling back to default host/port.");
+            logger.Info("Gateway runtime target: " + config.GetSummary());
+            return config;
+        }
+
+        try
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = int.MaxValue;
+
+            string json = File.ReadAllText(configPath, Encoding.UTF8);
+            object parsed = serializer.DeserializeObject(json);
+            Dictionary<string, object> root = parsed as Dictionary<string, object>;
+            Dictionary<string, object> gateway = GetNestedDictionary(root, "gateway");
+
+            string mode = GetDictionaryString(gateway, "mode");
+            string bind = GetDictionaryString(gateway, "bind");
+            string customBindHost = GetDictionaryString(gateway, "customBindHost");
+            int? port = GetDictionaryInt(gateway, "port");
+
+            config.Mode = string.IsNullOrWhiteSpace(mode) ? "local" : mode.Trim();
+            config.Bind = string.IsNullOrWhiteSpace(bind) ? "loopback" : bind.Trim();
+            config.CustomBindHost = string.IsNullOrWhiteSpace(customBindHost) ? null : customBindHost.Trim();
+            config.Host = ResolveConnectHost(config.Bind, config.CustomBindHost);
+
+            if (port.HasValue && port.Value >= 1 && port.Value <= 65535)
+            {
+                config.Port = port.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Error("Failed to read gateway runtime config. Using defaults. " + ex.Message);
+        }
+
+        logger.Info("Gateway runtime target: " + config.GetSummary());
+        return config;
     }
 
     private static string ReadGatewayToken(string openClawCommand, FileLogger logger)
@@ -150,23 +199,46 @@ internal static class OpenClawLauncher
         return token;
     }
 
-    private static void EnsureGatewayStarted(string openClawCommand, FileLogger logger, int timeoutSeconds)
+    private static void EnsureGatewayStarted(string openClawCommand, GatewayRuntimeConfig gatewayConfig, FileLogger logger, int timeoutSeconds)
     {
         RunProcess(openClawCommand, "gateway start", logger, true, false);
 
         DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-        while (DateTime.UtcNow < deadline)
+        DateTime initialAttemptDeadline = DateTime.UtcNow.AddSeconds(Math.Min(12, Math.Max(5, timeoutSeconds / 4)));
+        if (initialAttemptDeadline > deadline)
+        {
+            initialAttemptDeadline = deadline;
+        }
+
+        if (WaitForGatewayReachable(gatewayConfig, logger, initialAttemptDeadline))
+        {
+            return;
+        }
+
+        logger.Info("Gateway was not reachable after start; running local onboarding recovery.");
+        TryRecoverGateway(openClawCommand, gatewayConfig, logger, deadline);
+        if (WaitForGatewayReachable(gatewayConfig, logger, deadline))
+        {
+            return;
+        }
+
+        throw new TimeoutException("Timed out waiting for the OpenClaw gateway to become reachable.");
+    }
+
+    private static bool WaitForGatewayReachable(GatewayRuntimeConfig gatewayConfig, FileLogger logger, DateTime deadlineUtc)
+    {
+        while (DateTime.UtcNow < deadlineUtc)
         {
             try
             {
-                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(BaseDashboardUrl);
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(gatewayConfig.HealthcheckUrl);
                 request.Timeout = 5000;
                 request.Method = "GET";
 
                 using (WebResponse response = request.GetResponse())
                 {
                     logger.Info("Gateway endpoint is reachable.");
-                    return;
+                    return true;
                 }
             }
             catch (WebException ex)
@@ -174,17 +246,70 @@ internal static class OpenClawLauncher
                 if (ex.Response != null)
                 {
                     logger.Info("Gateway responded with an HTTP error, which still proves the service is up.");
-                    return;
+                    return true;
                 }
             }
 
             Thread.Sleep(1500);
         }
 
-        throw new TimeoutException("Timed out waiting for the OpenClaw gateway to become reachable.");
+        return false;
     }
 
-    private static string ResolveDashboardUrl(string openClawCommand, string gatewayToken, FileLogger logger)
+    private static void TryRecoverGateway(string openClawCommand, GatewayRuntimeConfig gatewayConfig, FileLogger logger, DateTime deadlineUtc)
+    {
+        try
+        {
+            EnsureLocalGatewayConfiguration(openClawCommand, gatewayConfig, logger);
+            logger.Info("Starting OpenClaw gateway in the current user session after local recovery.");
+            StartUserSessionGateway(openClawCommand, logger);
+        }
+        catch (Exception ex)
+        {
+            logger.Error("Local onboarding recovery did not complete cleanly: " + ex.Message);
+        }
+    }
+
+    private static void EnsureLocalGatewayConfiguration(string openClawCommand, GatewayRuntimeConfig gatewayConfig, FileLogger logger)
+    {
+        bool needsModeUpdate = !string.Equals(gatewayConfig.Mode, "local", StringComparison.OrdinalIgnoreCase);
+        bool needsBindUpdate = !string.Equals(gatewayConfig.Bind, "loopback", StringComparison.OrdinalIgnoreCase);
+
+        if (!needsModeUpdate && !needsBindUpdate)
+        {
+            logger.Info("Gateway configuration already targets local loopback. Skipping config rewrite.");
+            return;
+        }
+
+        logger.Info("Ensuring local gateway configuration is explicit.");
+        if (needsModeUpdate)
+        {
+            RunProcess(openClawCommand, "config set gateway.mode local", logger, false, false);
+            gatewayConfig.Mode = "local";
+        }
+
+        if (needsBindUpdate)
+        {
+            RunProcess(openClawCommand, "config set gateway.bind loopback", logger, false, false);
+            gatewayConfig.Bind = "loopback";
+        }
+    }
+
+    private static void StartUserSessionGateway(string openClawCommand, FileLogger logger)
+    {
+        ProcessStartInfo startInfo = new ProcessStartInfo(openClawCommand, "gateway");
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+
+        using (Process process = new Process())
+        {
+            process.StartInfo = startInfo;
+            process.Start();
+        }
+    }
+
+    private static string ResolveDashboardUrl(string openClawCommand, GatewayRuntimeConfig gatewayConfig, string gatewayToken, FileLogger logger)
     {
         CommandResult result = RunProcess(openClawCommand, "dashboard --no-open", logger, true, true);
         string standardOutput = result.StandardOutput ?? string.Empty;
@@ -197,17 +322,128 @@ internal static class OpenClawLauncher
                 string url = line.Substring(prefix.Length).Trim();
                 if (!string.IsNullOrWhiteSpace(url))
                 {
-                    return url;
+                    Uri parsedUrl;
+                    if (Uri.TryCreate(url, UriKind.Absolute, out parsedUrl))
+                    {
+                        if (string.Equals(parsedUrl.Host, gatewayConfig.Host, StringComparison.OrdinalIgnoreCase) &&
+                            parsedUrl.Port == gatewayConfig.Port)
+                        {
+                            return url;
+                        }
+
+                        logger.Info("Dashboard URL from CLI does not match gateway.bind/customBindHost/port. Falling back to the derived runtime target.");
+                    }
                 }
             }
         }
 
-        return BuildDashboardUrl(gatewayToken);
+        return BuildDashboardUrl(gatewayConfig, gatewayToken);
     }
 
-    private static string BuildDashboardUrl(string token)
+    private static string BuildDashboardUrl(GatewayRuntimeConfig gatewayConfig, string token)
     {
-        return BaseDashboardUrl + "#token=" + Uri.EscapeDataString(token);
+        return gatewayConfig.DashboardUrl + "#token=" + Uri.EscapeDataString(token);
+    }
+
+    private static string GetOpenClawConfigPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".openclaw",
+            "openclaw.json"
+        );
+    }
+
+    private static Dictionary<string, object> GetNestedDictionary(Dictionary<string, object> source, string key)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        object value;
+        if (source.TryGetValue(key, out value))
+        {
+            return value as Dictionary<string, object>;
+        }
+
+        return null;
+    }
+
+    private static string GetDictionaryString(Dictionary<string, object> source, string key)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        object value;
+        if (source.TryGetValue(key, out value) && value != null)
+        {
+            return value.ToString();
+        }
+
+        return null;
+    }
+
+    private static int? GetDictionaryInt(Dictionary<string, object> source, string key)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        object value;
+        if (!source.TryGetValue(key, out value) || value == null)
+        {
+            return null;
+        }
+
+        if (value is int)
+        {
+            return (int)value;
+        }
+
+        if (value is long)
+        {
+            long longValue = (long)value;
+            return (int)longValue;
+        }
+
+        if (value is double)
+        {
+            double doubleValue = (double)value;
+            return (int)doubleValue;
+        }
+
+        int parsedValue;
+        if (int.TryParse(value.ToString(), out parsedValue))
+        {
+            return parsedValue;
+        }
+
+        return null;
+    }
+
+    private static string BuildHttpUrl(string host, int port)
+    {
+        return "http://" + host + ":" + port.ToString() + "/";
+    }
+
+    private static string BuildWebSocketUrl(string host, int port)
+    {
+        return "ws://" + host + ":" + port.ToString();
+    }
+
+    // For the local desktop shell, only gateway.bind=custom changes the connect host.
+    private static string ResolveConnectHost(string bindMode, string customBindHost)
+    {
+        if (string.Equals(bindMode, "custom", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(customBindHost))
+        {
+            return customBindHost;
+        }
+
+        return DefaultGatewayHost;
     }
 
     private static string GetWebViewUserDataRoot()
@@ -693,6 +929,7 @@ internal static class OpenClawLauncher
         private static string BuildStorageBootstrapScript(LaunchContext context, bool clearDeviceState)
         {
             string gatewayUrl = ToJavaScriptStringLiteral(context.GatewayWebSocketUrl);
+            string legacyGatewayUrl = ToJavaScriptStringLiteral(BuildWebSocketUrl(DefaultGatewayHost, DefaultGatewayPort));
             string token = ToJavaScriptStringLiteral(context.GatewayToken);
             string deviceStateResetScript = clearDeviceState
                 ? "try { localStorage.removeItem('" + DeviceTokenStorageKey + "'); } catch (_) {} try { localStorage.removeItem('" + DeviceIdentityStorageKey + "'); } catch (_) {}"
@@ -705,7 +942,7 @@ internal static class OpenClawLauncher
                 "    var token = " + token + ";" +
                 "    var tokenKey = 'openclaw.control.token.v1:' + gatewayUrl;" +
                 "    try { sessionStorage.setItem(tokenKey, token); } catch (_) {}" +
-                "    try { sessionStorage.removeItem('openclaw.control.token.v1:ws://localhost:18789'); } catch (_) {}" +
+                "    try { sessionStorage.removeItem('openclaw.control.token.v1:' + " + legacyGatewayUrl + "); } catch (_) {}" +
                 "    try {" +
                 "      var settingsRaw = localStorage.getItem('" + ControlSettingsStorageKey + "');" +
                 "      var settings = settingsRaw ? JSON.parse(settingsRaw) : {};" +
@@ -845,6 +1082,52 @@ internal static class OpenClawLauncher
         public string GatewayToken { get; private set; }
         public string GatewayWebSocketUrl { get; private set; }
         public string DashboardUrl { get; private set; }
+    }
+
+    private sealed class GatewayRuntimeConfig
+    {
+        public GatewayRuntimeConfig(string host, int port)
+        {
+            Host = host;
+            Port = port;
+            Mode = "local";
+            Bind = "loopback";
+        }
+
+        public string Mode { get; set; }
+        public string Host { get; set; }
+        public int Port { get; set; }
+        public string Bind { get; set; }
+        public string CustomBindHost { get; set; }
+
+        public string HealthcheckUrl
+        {
+            get { return BuildHttpUrl(Host, Port); }
+        }
+
+        public string DashboardUrl
+        {
+            get { return BuildHttpUrl(Host, Port); }
+        }
+
+        public string WebSocketUrl
+        {
+            get { return BuildWebSocketUrl(Host, Port); }
+        }
+
+        public string GetSummary()
+        {
+            return string.Format(
+                "bind={0}; customBindHost={1}; host={2}; port={3}; healthcheck={4}; dashboard={5}; websocket={6}",
+                Bind,
+                CustomBindHost ?? string.Empty,
+                Host,
+                Port,
+                HealthcheckUrl,
+                DashboardUrl,
+                WebSocketUrl
+            );
+        }
     }
 
     private sealed class DashboardPageState

@@ -22,7 +22,7 @@ try {
     $content = New-Object System.Net.Http.MultipartFormDataContent
 
     $summaryBytes = [System.IO.File]::ReadAllBytes($SummaryPath)
-    $summaryPart = New-Object System.Net.Http.ByteArrayContent($summaryBytes)
+    $summaryPart = New-Object System.Net.Http.ByteArrayContent(,$summaryBytes)
     $summaryPart.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/json')
 
     $content.Add($summaryPart, 'summary', [System.IO.Path]::GetFileName($SummaryPath))
@@ -36,10 +36,24 @@ try {
     }
 
     $result = $body | ConvertFrom-Json
-    return [pscustomobject]@{
+    $uploadResult = [pscustomobject]@{
         success = [bool]$result.success
         reportId = [string]$result.reportId
     }
+
+    try {
+        $resultPath = $SummaryPath + '.upload-result.json'
+        $resultDir = Split-Path -Parent $resultPath
+        if ($resultDir) { New-Item -ItemType Directory -Force -Path $resultDir | Out-Null }
+        $resultJson = @{
+            reportId = $uploadResult.reportId
+            success = $uploadResult.success
+            uploadedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Depth 4
+        [System.IO.File]::WriteAllText($resultPath, $resultJson, [System.Text.Encoding]::UTF8)
+    } catch { }
+
+    return $uploadResult
 } finally {
     if ($null -ne $client) {
         $client.Dispose()

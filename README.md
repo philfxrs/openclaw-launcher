@@ -33,6 +33,10 @@ The deliverable is a single `OpenClawSetup.exe` bootstrapper built with Inno Set
   Native Windows launcher entrypoint used by the desktop shortcut. It starts the OpenClaw gateway and opens the dashboard in an app-style Edge window.
 - `build/*.ps1`
   Build pipeline to sync upstream assets, compile the launcher, execute local installer checks, and compile the installer.
+- `tools/installer-diagnostics-server/*`
+  Minimal Node.js service that receives the redacted installer diagnostics summary, creates a GitHub private-repo issue, and returns a `reportId`.
+- `tools/installer-diagnostics-worker/*`
+  Minimal Cloudflare Worker HTTPS relay that receives the redacted installer diagnostics summary, creates a GitHub private-repo issue, and returns a `reportId`.
 
 ## Build
 
@@ -52,6 +56,13 @@ powershell -ExecutionPolicy Bypass -File .\build\Build-Launcher.ps1
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1
+```
+
+If you want the installer to upload redacted failure summaries automatically, pass the diagnostics endpoint explicitly at build time:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build\Build-Installer.ps1 `
+  -DiagnosticsUploadUri 'https://your-host.example.com/installer-diagnostics'
 ```
 
 4. If you need an unsigned local debug build, skip the signing step explicitly:
@@ -156,6 +167,28 @@ git push origin v0.1.1
 6. The bootstrap executes the vendored official `https://openclaw.ai/install.ps1`, unless a healthy existing install can be reused.
 7. The bootstrap performs onboarding, validates the installed state, creates shortcuts, and verifies first launch.
 8. On failure, logs and install state are preserved for retry or repair.
+
+## Diagnostics service
+
+The first-stage installer diagnostics loop is split into two pieces:
+
+- the installer generates a redacted `diagnostics-summary.json` and uploads it
+- the minimal service receives that summary, creates a private GitHub issue, and returns a `reportId`
+
+For Cloudflare Worker deployment, use [tools/installer-diagnostics-worker/README.md](tools/installer-diagnostics-worker/README.md).
+
+The existing local Node prototype remains available in [tools/installer-diagnostics-server/README.md](tools/installer-diagnostics-server/README.md) for local experiments only, but the deployable HTTPS relay for this stage is the Cloudflare Worker.
+
+## Validation Release
+
+The current Windows installer validation status is still: partial pass. The online upload and GitHub issue loop are confirmed, but real Windows GUI failure evidence is still being collected from small-scope tester installs.
+
+For this limited validation release, use:
+
+- [docs/windows-installer-validation-release.md](docs/windows-installer-validation-release.md)
+- [docs/windows-installer-failure-feedback-template.md](docs/windows-installer-failure-feedback-template.md)
+- [docs/windows-installer-test-invite.md](docs/windows-installer-test-invite.md)
+- [docs/windows-installer-github-prerelease.md](docs/windows-installer-github-prerelease.md)
 
 ## Notes
 

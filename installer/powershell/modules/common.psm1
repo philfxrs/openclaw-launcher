@@ -674,7 +674,53 @@ function Protect-DiagnosticText {
     return $value
 }
 
-function Protect-DiagnosticObject {
+function Get-DiagnosticFallbackValue {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$InputObject,
+        [string]$Reason
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    $typeName = $null
+    try {
+        $typeName = $InputObject.GetType().FullName
+    } catch {
+        $typeName = $null
+    }
+
+    if ($InputObject -is [string]) {
+        return (Protect-DiagnosticText -Text $InputObject)
+    }
+
+    if ($InputObject -is [ValueType]) {
+        return $InputObject
+    }
+
+    $fallback = [ordered]@{
+        type = $typeName
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        $fallback.reason = (Protect-DiagnosticText -Text $Reason)
+    }
+
+    try {
+        $text = [string]$InputObject
+        if (-not [string]::IsNullOrWhiteSpace($text) -and $text -ne $typeName) {
+            $fallback.value = (Protect-DiagnosticText -Text $text)
+        }
+    } catch {
+    }
+
+    return $fallback
+}
+
+function Get-DiagnosticObjectProperties {
     [CmdletBinding()]
     param(
         [AllowNull()]
@@ -682,50 +728,137 @@ function Protect-DiagnosticObject {
     )
 
     if ($null -eq $InputObject) {
+        return @()
+    }
+
+    try {
+        if ($null -eq $InputObject.PSObject) {
+            return @()
+        }
+
+        return @($InputObject.PSObject.Properties | Where-Object { $_ -and $_.IsGettable })
+    } catch {
+        return @()
+    }
+}
+
+function Get-MinimalDiagnosticsSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InstallerVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorCode,
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorMessage,
+        [string]$LocalLogPath,
+        [string]$LocalStatePath,
+        [string]$FallbackReason
+    )
+
+    $summary = [ordered]@{
+        schemaVersion = 1
+        source = 'windows-installer'
+        installerVersion = $InstallerVersion
+        buildVersion = $BuildVersion
+        timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+        errorCode = $ErrorCode
+        errorMessage = (Protect-DiagnosticText -Text $ErrorMessage)
+        references = [ordered]@{
+            localLogPath = $LocalLogPath
+            localStatePath = $LocalStatePath
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($FallbackReason)) {
+        $summary.summaryMode = 'minimal-fallback'
+        $summary.fallbackReason = (Protect-DiagnosticText -Text $FallbackReason)
+    }
+
+    return $summary
+}
+
+function Protect-DiagnosticObject {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$InputObject,
+        [int]$Depth = 0
+    )
+
+    if ($null -eq $InputObject) {
         return $null
     }
 
-    if ($InputObject -is [string]) {
-        return (Protect-DiagnosticText -Text $InputObject)
+    if ($Depth -ge 8) {
+        return (Get-DiagnosticFallbackValue -InputObject $InputObject -Reason 'max-depth-reached')
     }
 
-    if ($InputObject -is [System.Collections.IDictionary]) {
-        $dictionary = [ordered]@{}
-        foreach ($key in $InputObject.Keys) {
-            $name = [string]$key
-            if ($name -match '(?i)token|key|secret|password|auth|credential') {
-                $dictionary[$name] = '__REDACTED__'
-            } else {
-                $dictionary[$name] = Protect-DiagnosticObject -InputObject $InputObject[$key]
+    try {
+        if ($InputObject -is [string]) {
+            return (Protect-DiagnosticText -Text $InputObject)
+        }
+
+        if ($InputObject -is [ValueType]) {
+            return $InputObject
+        }
+
+        if ($InputObject -is [System.Collections.IDictionary]) {
+            $dictionary = [ordered]@{}
+            foreach ($key in @($InputObject.Keys)) {
+                $name = [string]$key
+                if ($name -match '(?i)token|key|secret|password|auth|credential') {
+                    $dictionary[$name] = '__REDACTED__'
+                } else {
+                    try {
+                        $dictionary[$name] = Protect-DiagnosticObject -InputObject $InputObject[$key] -Depth ($Depth + 1)
+                    } catch {
+                        $dictionary[$name] = Get-DiagnosticFallbackValue -InputObject $InputObject[$key] -Reason $_.Exception.Message
+                    }
+                }
             }
+
+            return $dictionary
         }
 
-        return $dictionary
-    }
-
-    if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
-        $items = @()
-        foreach ($item in $InputObject) {
-            $items += ,(Protect-DiagnosticObject -InputObject $item)
-        }
-
-        return $items
-    }
-
-    if ($InputObject.PSObject -and $InputObject.PSObject.Properties.Count -gt 0) {
-        $objectCopy = [ordered]@{}
-        foreach ($property in $InputObject.PSObject.Properties) {
-            if ($property.Name -match '(?i)token|key|secret|password|auth|credential') {
-                $objectCopy[$property.Name] = '__REDACTED__'
-            } else {
-                $objectCopy[$property.Name] = Protect-DiagnosticObject -InputObject $property.Value
+        if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
+            $items = @()
+            foreach ($item in $InputObject) {
+                try {
+                    $items += ,(Protect-DiagnosticObject -InputObject $item -Depth ($Depth + 1))
+                } catch {
+                    $items += ,(Get-DiagnosticFallbackValue -InputObject $item -Reason $_.Exception.Message)
+                }
             }
+
+            return $items
         }
 
-        return $objectCopy
-    }
+        $properties = Get-DiagnosticObjectProperties -InputObject $InputObject
+        if (@($properties).Count -gt 0) {
+            $objectCopy = [ordered]@{}
+            foreach ($property in $properties) {
+                if ($property.Name -match '(?i)token|key|secret|password|auth|credential') {
+                    $objectCopy[$property.Name] = '__REDACTED__'
+                    continue
+                }
 
-    return $InputObject
+                try {
+                    $objectCopy[$property.Name] = Protect-DiagnosticObject -InputObject $property.Value -Depth ($Depth + 1)
+                } catch {
+                    $objectCopy[$property.Name] = Get-DiagnosticFallbackValue -InputObject $property.Value -Reason $_.Exception.Message
+                }
+            }
+
+            return $objectCopy
+        }
+
+        return (Get-DiagnosticFallbackValue -InputObject $InputObject)
+    } catch {
+        return (Get-DiagnosticFallbackValue -InputObject $InputObject -Reason $_.Exception.Message)
+    }
 }
 
 function Get-LastExternalCommandInfo {
@@ -757,81 +890,85 @@ function New-DiagnosticsSummary {
         [string]$LocalStatePath
     )
 
-    $session = logging\Get-InstallerSessionInfo
-    $lastCommandInfo = Get-LastExternalCommandInfo
-    $nodeVersion = $null
-    if ($State.dependencies -and $State.dependencies.node) {
-        $nodeVersion = $State.dependencies.node.version
-    }
+    try {
+        $session = logging\Get-InstallerSessionInfo
+        $lastCommandInfo = Get-LastExternalCommandInfo
+        $nodeVersion = $null
+        if ($State.dependencies -and $State.dependencies.node) {
+            $nodeVersion = $State.dependencies.node.version
+        }
 
-    $npmVersion = $null
-    if ($State.dependencies -and $State.dependencies.npm) {
-        $npmVersion = Get-CommandVersionText -FilePath $State.dependencies.npm.path
-    }
+        $npmVersion = $null
+        if ($State.dependencies -and $State.dependencies.npm -and $State.dependencies.npm.path) {
+            $npmVersion = Get-CommandVersionText -FilePath $State.dependencies.npm.path
+        }
 
-    $gitVersion = $null
-    if ($State.dependencies -and $State.dependencies.git) {
-        $gitVersion = Get-CommandVersionText -FilePath $State.dependencies.git.path
-    }
+        $gitVersion = $null
+        if ($State.dependencies -and $State.dependencies.git -and $State.dependencies.git.path) {
+            $gitVersion = Get-CommandVersionText -FilePath $State.dependencies.git.path
+        }
 
-    $summary = [ordered]@{
-        schemaVersion = 1
-        source = 'windows-installer'
-        installerVersion = $InstallerVersion
-        buildVersion = $BuildVersion
-        timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
-        osVersion = [Environment]::OSVersion.VersionString
-        architecture = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-        isAdmin = (
-            New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        locale = [System.Globalization.CultureInfo]::CurrentCulture.Name
-        currentStep = [ordered]@{
-            id = if ($session) { $session.currentStepId } else { $null }
-            number = if ($session) { $session.currentStepNumber } else { $null }
-            name = if ($session) { $session.currentStepName } else { $null }
-        }
-        failedStep = [ordered]@{
-            id = if ($session) { $session.currentStepId } else { $null }
-            code = $ErrorCode
-        }
-        errorCode = $ErrorCode
-        errorMessage = $ErrorMessage
-        lastCommand = if ($lastCommandInfo) { ((@($lastCommandInfo.filePath) + @($lastCommandInfo.arguments)) -join ' ').Trim() } else { $null }
-        exitCode = if ($lastCommandInfo) { $lastCommandInfo.exitCode } else { $null }
-        dependencies = [ordered]@{
-            node = [ordered]@{
-                detected = [bool]($State.dependencies -and $State.dependencies.node -and $State.dependencies.node.installed)
-                version = $nodeVersion
+        $summary = [ordered]@{
+            schemaVersion = 1
+            source = 'windows-installer'
+            installerVersion = $InstallerVersion
+            buildVersion = $BuildVersion
+            timestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+            osVersion = [Environment]::OSVersion.VersionString
+            architecture = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+            isAdmin = (
+                New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            locale = [System.Globalization.CultureInfo]::CurrentCulture.Name
+            currentStep = [ordered]@{
+                id = if ($session) { $session.currentStepId } else { $null }
+                number = if ($session) { $session.currentStepNumber } else { $null }
+                name = if ($session) { $session.currentStepName } else { $null }
             }
-            npm = [ordered]@{
-                detected = [bool]($State.dependencies -and $State.dependencies.npm -and $State.dependencies.npm.installed)
-                version = $npmVersion
+            failedStep = [ordered]@{
+                id = if ($session) { $session.currentStepId } else { $null }
+                code = $ErrorCode
             }
-            git = [ordered]@{
-                detected = [bool]($State.dependencies -and $State.dependencies.git -and $State.dependencies.git.installed)
-                version = $gitVersion
+            errorCode = $ErrorCode
+            errorMessage = $ErrorMessage
+            lastCommand = if ($lastCommandInfo) { ((@($lastCommandInfo.filePath) + @($lastCommandInfo.arguments)) -join ' ').Trim() } else { $null }
+            exitCode = if ($lastCommandInfo) { $lastCommandInfo.exitCode } else { $null }
+            dependencies = [ordered]@{
+                node = [ordered]@{
+                    detected = [bool]($State.dependencies -and $State.dependencies.node -and $State.dependencies.node.installed)
+                    version = $nodeVersion
+                }
+                npm = [ordered]@{
+                    detected = [bool]($State.dependencies -and $State.dependencies.npm -and $State.dependencies.npm.installed)
+                    version = $npmVersion
+                }
+                git = [ordered]@{
+                    detected = [bool]($State.dependencies -and $State.dependencies.git -and $State.dependencies.git.installed)
+                    version = $gitVersion
+                }
+                webview2 = [ordered]@{
+                    detected = [bool]($State.dependencies -and $State.dependencies.webview2 -and $State.dependencies.webview2.installed)
+                }
+                openclaw = [ordered]@{
+                    detected = [bool]($State.dependencies -and $State.dependencies.openclaw -and $State.dependencies.openclaw.installed)
+                }
             }
-            webview2 = [ordered]@{
-                detected = [bool]($State.dependencies -and $State.dependencies.webview2 -and $State.dependencies.webview2.installed)
+            installationState = [ordered]@{
+                launcherExists = [bool]($State.installRoot -and (Test-Path (Join-Path $State.installRoot 'bin\OpenClawLauncher.exe')))
+                shortcutExists = [bool]($State.shortcuts -and @($State.shortcuts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
+                gatewayReachable = [bool]$State.launcherValidated
+                installRootExists = [bool]($State.installRoot -and (Test-Path $State.installRoot))
             }
-            openclaw = [ordered]@{
-                detected = [bool]($State.dependencies -and $State.dependencies.openclaw -and $State.dependencies.openclaw.installed)
+            references = [ordered]@{
+                localLogPath = $LocalLogPath
+                localStatePath = $LocalStatePath
             }
         }
-        installationState = [ordered]@{
-            launcherExists = [bool]($State.installRoot -and (Test-Path (Join-Path $State.installRoot 'bin\OpenClawLauncher.exe')))
-            shortcutExists = [bool]($State.shortcuts -and @($State.shortcuts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
-            gatewayReachable = [bool]$State.launcherValidated
-            installRootExists = [bool]($State.installRoot -and (Test-Path $State.installRoot))
-        }
-        references = [ordered]@{
-            localLogPath = $LocalLogPath
-            localStatePath = $LocalStatePath
-        }
-    }
 
-    return (Protect-DiagnosticObject -InputObject $summary)
+        return (Protect-DiagnosticObject -InputObject $summary)
+    } catch {
+        return (Get-MinimalDiagnosticsSummary -InstallerVersion $InstallerVersion -BuildVersion $BuildVersion -ErrorCode $ErrorCode -ErrorMessage $ErrorMessage -LocalLogPath $LocalLogPath -LocalStatePath $LocalStatePath -FallbackReason $_.Exception.Message)
+    }
 }
 
 function Get-ExternalCommandFailureSummary {

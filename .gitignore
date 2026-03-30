@@ -3,3 +3,5 @@ resources/manifests/dependencies.json
 resources/upstream/openclaw-install.ps1
 resources/upstream/openclaw-install.manifest.json
 *.log
+tools/installer-diagnostics-server/node_modules/
+tools/installer-diagnostics-worker/node_modules/

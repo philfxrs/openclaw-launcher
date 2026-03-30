@@ -23,7 +23,6 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern dynamic
 DisableWelcomePage=no
 DisableDirPage=yes
@@ -79,6 +78,7 @@ var
   BootstrapFailureMessage: String;
   BootstrapFailureCode: String;
   BootstrapDidFail: Boolean;
+  BootstrapFailureDisplayed: Boolean;
   BootstrapReportId: String;
   BootstrapLogPath: String;
   BootstrapUploadStatus: String;
@@ -181,6 +181,35 @@ begin
   except
     Log('Bootstrap page hide failed: ' + GetExceptionMessage);
   end;
+end;
+
+procedure ShowBootstrapFailureDialog;
+var
+  FailureText: String;
+begin
+  if BootstrapFailureDisplayed then
+    Exit;
+
+  BootstrapFailureDisplayed := True;
+  FailureText := Trim(BootstrapFailureMessage);
+
+  if LooksLikeUnreadableFailureText(FailureText) then
+    FailureText := GetDefaultFailureSummary(BootstrapFailureCode);
+
+  if (BootstrapReportId <> '') and (Pos('参考编号: ', FailureText) = 0) then begin
+    FailureText := FailureText + #13#10#13#10 +
+      '参考编号: ' + BootstrapReportId;
+  end;
+
+  SuppressibleMsgBox(FailureText, mbCriticalError, MB_OK, IDOK);
+end;
+
+procedure FinalizeBootstrapFailure;
+begin
+  BootstrapDidFail := True;
+  SafeCloseBootstrapUi;
+  ShowBootstrapFailureDialog;
+  WizardForm.Close;
 end;
 
 (* ── Stage ID → Chinese caption ──────────────────────────────────── *)
@@ -295,6 +324,7 @@ begin
   BootstrapFailureMessage := '';
   BootstrapFailureCode := '';
   BootstrapDidFail := False;
+  BootstrapFailureDisplayed := False;
   BootstrapReportId := '';
   BootstrapLogPath := '';
   BootstrapUploadStatus := '';
@@ -322,8 +352,13 @@ begin
     ' -OfficialScriptPath ' + AddQuotes(ExpandConstant('{app}\resources\upstream\openclaw-install.ps1')) +
     ' -LauncherPath ' + AddQuotes(ExpandConstant('{app}\bin\OpenClawLauncher.exe')) +
     ' -InstallerVersion ' + AddQuotes('{#AppVersion}') +
-    ' -BuildVersion ' + AddQuotes('{#AppVersion}') +
-    ' -DiagnosticsUploadUri ' + AddQuotes('{#DiagnosticsUploadUrl}') +
+    ' -BuildVersion ' + AddQuotes('{#AppVersion}');
+
+  if '{#DiagnosticsUploadUrl}' <> '' then
+    Params := Params +
+      ' -DiagnosticsUploadUri ' + AddQuotes('{#DiagnosticsUploadUrl}');
+
+  Params := Params +
     ' -ExistingInstallAction Auto' +
     ' -ShortcutName "OpenClaw"';
 
@@ -341,7 +376,7 @@ begin
     BootstrapDidFail := True;
     SafeCloseBootstrapUi;
     BootstrapFailureMessage := '无法启动 OpenClaw 安装事务: ' + GetExceptionMessage;
-    RaiseException(BootstrapFailureMessage);
+    Exit;
   end;
 
   if BootstrapResultCode <> 0 then begin
@@ -355,7 +390,7 @@ begin
     end;
 
     SafeCloseBootstrapUi;
-    RaiseException(BootstrapFailureMessage);
+    Exit;
   end;
 
   SafeSetInstallProgress('OpenClaw 安装完成。', 100);
@@ -398,10 +433,13 @@ begin
 
   try
     RunOpenClawBootstrap;
+    if BootstrapDidFail then begin
+      FinalizeBootstrapFailure;
+      Exit;
+    end;
   except
-    BootstrapDidFail := True;
-    SafeCloseBootstrapUi;
-    RaiseException(GetExceptionMessage);
+    BootstrapFailureMessage := GetExceptionMessage;
+    FinalizeBootstrapFailure;
   end;
 end;
 

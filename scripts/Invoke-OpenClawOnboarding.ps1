@@ -14,8 +14,15 @@ if (-not $GatewayToken) {
 $existingTokenResult = Invoke-OpenClaw -Arguments @('config', 'get', 'gateway.auth.token') -RedactStdOut -AllowNonZeroExit
 $existingToken = $existingTokenResult.StdOut.Trim()
 
+function Set-LocalGatewayConfiguration {
+    Write-Log -Message 'Ensuring local gateway configuration is explicit.'
+    Invoke-OpenClaw -Arguments @('config', 'set', 'gateway.mode', 'local') | Out-Null
+    Invoke-OpenClaw -Arguments @('config', 'set', 'gateway.bind', 'loopback') | Out-Null
+}
+
 if ($existingToken) {
     Write-Log -Message 'Existing OpenClaw gateway token detected; skipping first-run onboarding.'
+    Set-LocalGatewayConfiguration
     Invoke-OpenClaw -Arguments @('doctor', '--non-interactive') -AllowNonZeroExit | Out-Null
     Invoke-OpenClaw -Arguments @('gateway', 'install', '--force') | Out-Null
     Invoke-OpenClaw -Arguments @('gateway', 'start') | Out-Null
@@ -33,6 +40,8 @@ if ($existingToken) {
         '--install-daemon',
         '--accept-risk'
     ) -SensitiveValues @($GatewayToken) | Out-Null
+
+    Set-LocalGatewayConfiguration
 }
 
 Wait-Until -Description 'OpenClaw gateway HTTP endpoint' -TimeoutSeconds 90 -PollSeconds 3 -Condition {

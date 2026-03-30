@@ -1,0 +1,17 @@
+{
+  "name": "openclaw-installer-diagnostics-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Minimal server for OpenClaw installer diagnostics summary uploads.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.2"
+  }
+}
