@@ -683,7 +683,7 @@ $null = Invoke-InstallerPhase -StepId 'official-verify' -StepNumber 12 -StepName
 
 $shortcutAction = {
     $shortcutResult = & (Join-Path $PSScriptRoot 'steps\create-shortcut.ps1') -LauncherPath $LauncherPath -ShortcutName $ShortcutName
-    $state.shortcuts = @($shortcutResult.desktopShortcut, $shortcutResult.startMenuShortcut)
+    $state.shortcuts = @($shortcutResult.desktopShortcut, $shortcutResult.startMenuShortcut, $shortcutResult.configuratorDesktopShortcut, $shortcutResult.configuratorStartMenuShortcut) | Where-Object { $_ }
     Save-State
     return $shortcutResult
 }
