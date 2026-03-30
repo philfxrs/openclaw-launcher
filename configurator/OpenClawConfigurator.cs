@@ -463,6 +463,20 @@ internal static class ConfigSchema
 
 internal sealed class ConfigStore
 {
+    private static readonly Dictionary<string, string> ProviderTypeToId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Anthropic", "anthropic" },
+        { "DeepSeek", "deepseek" },
+        { "Google", "google" },
+        { "Mistral AI", "mistral" },
+        { "Moonshot", "moonshot" },
+        { "OpenAI", "openai" },
+        { "OpenRouter", "openrouter" },
+        { "Qwen (Alibaba Cloud)", "qwen" },
+        { "xAI (Grok)", "xai" },
+        { "Z.AI", "zai" }
+    };
+
     private readonly JavaScriptSerializer _serializer;
     private Dictionary<string, object> _data;
     private Dictionary<string, object> _defaults;
@@ -555,7 +569,13 @@ internal sealed class ConfigStore
 
     public void Save()
     {
-        Dictionary<string, object> nested = UnflattenDictionary(_data);
+        Dictionary<string, object> flatToSave = new Dictionary<string, object>(_data, StringComparer.OrdinalIgnoreCase);
+
+        // Keep compatibility with recent OpenClaw schema versions.
+        MigrateLegacyProviderToModels(flatToSave);
+        RemoveSchemaInvalidKeys(flatToSave);
+
+        Dictionary<string, object> nested = UnflattenDictionary(flatToSave);
         string json = FormatJson(_serializer.Serialize(nested));
 
         string dir = Path.GetDirectoryName(ConfigPath);
@@ -565,6 +585,113 @@ internal sealed class ConfigStore
         }
 
         File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
+
+        // Keep in-memory state aligned with what's persisted to disk.
+        _data = flatToSave;
+    }
+
+    private static void MigrateLegacyProviderToModels(Dictionary<string, object> flat)
+    {
+        string providerType = GetFlatString(flat, "provider.type");
+        string providerModel = GetFlatString(flat, "provider.model");
+        string providerBaseUrl = GetFlatString(flat, "provider.api.base");
+        string providerApiKey = GetFlatString(flat, "provider.api.key");
+
+        if (string.IsNullOrWhiteSpace(providerType))
+        {
+            return;
+        }
+
+        string providerId;
+        if (!ProviderTypeToId.TryGetValue(providerType.Trim(), out providerId))
+        {
+            providerId = providerType.Trim().ToLowerInvariant().Replace(" ", "-");
+        }
+
+        flat["models.mode"] = "merge";
+
+        if (!string.IsNullOrWhiteSpace(providerBaseUrl))
+        {
+            flat["models.providers." + providerId + ".baseUrl"] = providerBaseUrl.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(providerApiKey))
+        {
+            flat["models.providers." + providerId + ".apiKey"] = providerApiKey.Trim();
+        }
+
+        // DeepSeek / OpenAI-compatible providers work best with openai-responses API shape.
+        flat["models.providers." + providerId + ".auth"] = "api-key";
+        flat["models.providers." + providerId + ".api"] = "openai-responses";
+
+        if (!string.IsNullOrWhiteSpace(providerModel))
+        {
+            flat["agents.defaults.model"] = providerId + "/" + providerModel.Trim();
+        }
+    }
+
+    private static void RemoveSchemaInvalidKeys(Dictionary<string, object> flat)
+    {
+        string[] rootKeys = new[]
+        {
+            "log", "launch", "autostart", "data", "install", "tray", "workdir", "provider", "debug", "custom"
+        };
+
+        for (int i = 0; i < rootKeys.Length; i++)
+        {
+            string prefix = rootKeys[i] + ".";
+            RemoveByExactOrPrefix(flat, rootKeys[i], prefix);
+        }
+
+        string[] gatewayKeys = new[]
+        {
+            "gateway.retry", "gateway.timeout", "gateway.dashboard", "gateway.healthcheck", "gateway.host", "gateway.background", "gateway.autostart"
+        };
+
+        for (int i = 0; i < gatewayKeys.Length; i++)
+        {
+            RemoveByExactOrPrefix(flat, gatewayKeys[i], gatewayKeys[i] + ".");
+        }
+
+        // env.vars must be an object in current schema; the form stores string text.
+        object envVars;
+        if (flat.TryGetValue("env.vars", out envVars) && envVars is string)
+        {
+            flat.Remove("env.vars");
+        }
+
+        object portObj;
+        if (flat.TryGetValue("gateway.port", out portObj) && portObj != null)
+        {
+            int port;
+            if (int.TryParse(portObj.ToString(), out port))
+            {
+                flat["gateway.port"] = port;
+            }
+        }
+    }
+
+    private static void RemoveByExactOrPrefix(Dictionary<string, object> flat, string exact, string prefix)
+    {
+        List<string> keys = flat.Keys
+            .Where(k => string.Equals(k, exact, StringComparison.OrdinalIgnoreCase) || k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (string key in keys)
+        {
+            flat.Remove(key);
+        }
+    }
+
+    private static string GetFlatString(Dictionary<string, object> flat, string key)
+    {
+        object value;
+        if (!flat.TryGetValue(key, out value) || value == null)
+        {
+            return string.Empty;
+        }
+
+        return value.ToString();
     }
 
     public string GetRawJson()
